@@ -266,6 +266,10 @@ shows real latency quantiles instead of `<pending>`.
 
 ### M1 — Pluggable, persistent frontier backend
 
+> 📋 **Detailed implementation plan:** [design/M1-pluggable-frontier.md](design/M1-pluggable-frontier.md)
+> (branch `feat/m1-pluggable-frontier`) — finalized interface, SQLite schema, exact
+> engine edits, tests, and rollout checklist.
+
 **Problem.** The frontier (`queue`), the seen-set (`self.seen_urls`), and
 `inflight` are all in-memory and local. Consequences: (a) a crash loses the entire
 crawl, (b) `seen_urls` grows unbounded (the code's own TODO), (c) no horizontal
