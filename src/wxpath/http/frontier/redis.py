@@ -6,11 +6,12 @@ settings change. **Experimental:** not covered by CI (requires a live Redis); th
 backend-agnostic contract tests document the behavior it must satisfy.
 
 Structures (all under ``namespace``):
-- ``queued``   sorted set, score = discovery seq (ZPOPMIN = FIFO == BFS for M1)
+- ``queued``   sorted set, score = ``priority*1e12 + seq`` (ZPOPMIN = lowest priority
+               then FIFO; with priority==depth this is BFS) — M2 ordering
 - ``seen``     set, dedup membership
 - ``inflight`` set, popped-but-not-done (reclaimed on resume)
 - ``done``     set, fully processed
-- ``task:{url}`` hash, the CrawlTask payload (depth, backlink, seq, pickled segments)
+- ``task:{url}`` hash, the CrawlTask payload (depth, backlink, priority, seq, segments)
 """
 
 import asyncio
@@ -60,12 +61,12 @@ class RedisFrontier(Frontier):
             if self._init_done:
                 return
             if self._resume:
-                # Interrupted in-flight URLs return to the queue at their stored seq.
+                # Interrupted in-flight URLs return to the queue at their stored score.
                 for raw in await self._r.smembers(self._k("inflight")):
                     url = raw.decode() if isinstance(raw, bytes) else raw
                     data = await self._r.hgetall(self._task_key(url))
-                    seq = float(data.get(b"seq", 0))
-                    await self._r.zadd(self._k("queued"), {url: seq})
+                    score = float(data.get(b"priority", 0)) * 1e12 + float(data.get(b"seq", 0))
+                    await self._r.zadd(self._k("queued"), {url: score})
                     await self._r.srem(self._k("inflight"), url)
             else:
                 # Clean start: drop the index structures (orphan task hashes are
@@ -86,11 +87,13 @@ class RedisFrontier(Frontier):
             mapping={
                 "depth": task.depth,
                 "backlink": task.backlink or "",
+                "priority": task.priority,
                 "seq": seq,
                 "segments": pickle.dumps(task.segments),
             },
         )
-        await self._r.zadd(self._k("queued"), {task.url: float(seq)})
+        # priority-major score, seq tiebreak → ZPOPMIN = lowest priority then FIFO.
+        await self._r.zadd(self._k("queued"), {task.url: float(task.priority) * 1e12 + seq})
         return True
 
     async def pop(self) -> Optional[CrawlTask]:

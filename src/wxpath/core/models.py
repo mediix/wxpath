@@ -12,13 +12,15 @@ class CrawlTask:
     backlink: Optional[str] = None
     base_url: Optional[str] = None
     
-    # Priority for the queue (lower number = higher priority)
-    # Useful if you want Depth-First behavior in a shared queue
-    priority: int = field(default=0)
+    # Priority for the queue (lower number = higher priority / popped sooner).
+    # Defaults to depth (→ BFS); an explicit priority is honored (M2+/M3 scoring).
+    priority: Optional[int] = field(default=None)
 
     def __post_init__(self):
-        # Automatically sync priority with depth for BFS behavior
-        self.priority = self.depth
+        # Sync priority with depth for BFS behavior ONLY when not explicitly set,
+        # so a caller-supplied priority survives (frontier orders by it).
+        if self.priority is None:
+            self.priority = self.depth
 
     def __lt__(self, other):
         return self.priority < other.priority

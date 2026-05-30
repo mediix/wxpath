@@ -13,8 +13,10 @@ from wxpath.http.frontier.memory import InMemoryFrontier
 BACKENDS = ["memory", "sqlite"]
 
 
-def _task(url: str, depth: int = 0) -> CrawlTask:
-    return CrawlTask(elem=None, url=url, segments=[], depth=depth, backlink=None)
+def _task(url: str, depth: int = 0, priority: int | None = None) -> CrawlTask:
+    return CrawlTask(
+        elem=None, url=url, segments=[], depth=depth, backlink=None, priority=priority
+    )
 
 
 @pytest.fixture(params=BACKENDS)
@@ -81,6 +83,19 @@ async def test_fifo_order_at_equal_priority(make_frontier):
     assert (await f.pop()).url == "http://x/a"
     assert (await f.pop()).url == "http://x/b"
     assert (await f.pop()).url == "http://x/c"
+    await f.close()
+
+
+@pytest.mark.asyncio
+async def test_pop_orders_by_priority(make_frontier):
+    f = make_frontier()
+    # Same depth, explicit priorities. Convention: lower value popped sooner (M2).
+    await f.push(_task("http://x/a", depth=1, priority=5))
+    await f.push(_task("http://x/b", depth=1, priority=1))
+    await f.push(_task("http://x/c", depth=1, priority=9))
+    assert (await f.pop()).url == "http://x/b"   # priority 1
+    assert (await f.pop()).url == "http://x/a"   # priority 5
+    assert (await f.pop()).url == "http://x/c"   # priority 9
     await f.close()
 
 

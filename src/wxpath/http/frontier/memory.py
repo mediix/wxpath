@@ -1,8 +1,10 @@
-"""In-memory frontier — the default, behavior-preserving backend.
+"""In-memory frontier — the default backend.
 
-A faithful wrapper over ``asyncio.Queue`` + a ``set``, reproducing the engine's
-historical FIFO/BFS behavior exactly (Invariant I5). M2 will swap the FIFO queue
-for a priority queue; M1 keeps it FIFO.
+An ``asyncio.PriorityQueue`` + a ``set``. Items are ordered by ``(priority, seq)``:
+lower priority value is popped sooner (the ``models.py`` convention), ties broken by
+insertion order (FIFO). With the default ``priority == depth``, this reproduces the
+engine's historical FIFO/BFS order exactly (Invariant I5) — see §4 of
+``design/M2-priority-scheduling.md``.
 """
 
 import asyncio
@@ -22,26 +24,32 @@ class InMemoryFrontier(Frontier):
     """
 
     def __init__(self) -> None:
-        # asyncio.Queue binds to the running loop lazily (Py>=3.10), so it is safe
-        # to construct outside an active event loop.
-        self._queue: "asyncio.Queue[CrawlTask]" = asyncio.Queue()
+        # PriorityQueue binds to the running loop lazily (Py>=3.10), so it is safe
+        # to construct outside an active event loop. Items: (priority, seq, task).
+        self._queue: "asyncio.PriorityQueue[tuple[int, int, CrawlTask]]" = (
+            asyncio.PriorityQueue()
+        )
         self._seen: set[str] = set()
+        self._seq = 0  # monotonic insertion counter → FIFO tiebreak (deterministic)
         self._closed = False
 
     async def push(self, task: CrawlTask) -> bool:
         if task.url in self._seen:
             return False
         self._seen.add(task.url)
-        self._queue.put_nowait(task)
+        # (priority, seq) makes the heap order deterministic and never compares the
+        # CrawlTask itself (seq is unique).
+        self._queue.put_nowait((task.priority, self._seq, task))
+        self._seq += 1
         return True
 
     async def pop(self) -> Optional[CrawlTask]:
         if self._closed and self._queue.empty():
             return None
-        # Blocks until an item arrives, exactly like the historical
-        # ``await queue.get()``. On engine teardown the submitter task is cancelled,
-        # which interrupts this await cleanly (M0).
-        return await self._queue.get()
+        # Blocks until an item arrives. On engine teardown the submitter task is
+        # cancelled, which interrupts this await cleanly (M0).
+        _priority, _seq, task = await self._queue.get()
+        return task
 
     async def mark_done(self, url: str) -> None:
         # No persistence → nothing to record.

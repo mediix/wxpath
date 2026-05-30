@@ -11,10 +11,11 @@ connection and returning, so two coroutines can never use the connection at once
 no lock or worker thread is required. Only :meth:`pop` awaits, and only on
 ``asyncio.sleep`` *between* probes (never mid-statement).
 
-Ordering (M1): ``discovery_seq ASC`` — pure FIFO, which reproduces the in-memory
-queue's BFS order exactly (``discovery_seq`` is monotonic with crawl depth). The
-``priority`` column is persisted but not yet consulted; M2 introduces the priority
-term in the ORDER BY and defines its direction.
+Ordering (M2): ``priority ASC, discovery_seq ASC`` — lower priority value popped
+sooner (the ``models.py`` convention), ties broken FIFO. With the default
+``priority == depth`` this reproduces the historical BFS order exactly
+(``discovery_seq`` is monotonic with crawl depth), so the change is dark until M3
+supplies a non-depth priority.
 """
 
 import asyncio
@@ -30,7 +31,7 @@ log = get_logger(__name__)
 
 # Bump when the on-disk schema or the pickled `segments` shape changes; a mismatch
 # against a pre-existing db raises rather than silently unpickling stale data.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # v2: pop ordering/index include `priority` (M2)
 
 
 class SQLiteFrontier(Frontier):
@@ -67,7 +68,9 @@ class SQLiteFrontier(Frontier):
             )
             """
         )
-        conn.execute("CREATE INDEX IF NOT EXISTS ix_pop ON frontier (state, discovery_seq)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_pop ON frontier (state, priority, discovery_seq)"
+        )
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         if resume:
             # Interrupted in-flight work returns to the queue; 'done' stays done.
@@ -108,7 +111,7 @@ class SQLiteFrontier(Frontier):
                 return None
             row = self._conn.execute(
                 "SELECT url, depth, backlink, segments FROM frontier "
-                "WHERE state='queued' ORDER BY discovery_seq ASC LIMIT 1"
+                "WHERE state='queued' ORDER BY priority ASC, discovery_seq ASC LIMIT 1"
             ).fetchone()
             if row is not None:
                 url, depth, backlink, segments = row
