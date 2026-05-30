@@ -23,6 +23,7 @@ from wxpath.core.runtime.helpers import parse_html
 from wxpath.hooks.registry import FetchContext, get_hooks
 from wxpath.http.client.crawler import Crawler
 from wxpath.http.client.request import Request
+from wxpath.http.frontier import Frontier, get_frontier_backend
 from wxpath.util.logging import get_logger
 
 log = get_logger(__name__)
@@ -145,9 +146,12 @@ class WXPathEngine(HookedEngineBase):
             respect_robots: bool = True,
             allowed_response_codes: set[int] = None,
             allow_redirects: bool = True,
+            frontier: Frontier | None = None,
         ):
-        # NOTE: Will grow unbounded in large crawls. Consider a LRU cache, or bloom filter.
-        self.seen_urls: set[str] = set()
+        # Dedup + queue now live behind the pluggable frontier backend. An injected
+        # frontier is consumed by a single run(); otherwise a fresh backend is built
+        # per run() from settings (see http.client.frontier).
+        self._injected_frontier = frontier
         self.crawler = crawler or Crawler(
             concurrency=concurrency, 
             per_host=per_host,
@@ -213,14 +217,14 @@ class WXPathEngine(HookedEngineBase):
 
         max_depth = self._get_max_depth(bin_or_segs, max_depth)
 
-        queue: asyncio.Queue[CrawlTask] = asyncio.Queue()
+        frontier = self._injected_frontier or get_frontier_backend()
         inflight: dict[str, CrawlTask] = {}
         pending_tasks = 0
 
-        def is_terminal():
-            # NOTE: consider adopting state machine pattern for determining 
+        async def is_terminal():
+            # NOTE: consider adopting state machine pattern for determining
             #       the current state of the engine.
-            return queue.empty() and pending_tasks <= 0
+            return (await frontier.size()) == 0 and pending_tasks <= 0
 
         total_yielded = 0
         if progress:
@@ -232,22 +236,20 @@ class WXPathEngine(HookedEngineBase):
             async def submitter():
                 nonlocal pending_tasks
                 while True:
-                    task = await queue.get()
+                    task = await frontier.pop()
 
                     if task is None:
                         break
 
-                    if task.url in self.seen_urls or task.url in inflight:
-                        queue.task_done()
+                    # Dedup is enforced at frontier.push(); a URL is queued at most
+                    # once, so this in-flight guard is defensive only.
+                    if task.url in inflight:
                         continue
 
-                    # Mark URL as seen immediately
-                    self.seen_urls.add(task.url)
                     inflight[task.url] = task
 
                     pending_tasks += 1
                     crawler.submit(Request(task.url, max_retries=0))
-                    queue.task_done()
 
             submit_task = asyncio.create_task(submitter())
 
@@ -265,7 +267,7 @@ class WXPathEngine(HookedEngineBase):
                     elem=None,
                     depth=seed_task.depth,
                     max_depth=max_depth,
-                    queue=queue,
+                    frontier=frontier,
                     pbar=pbar,
                 ):
                     yield await self.post_extract_hooks(output)
@@ -292,7 +294,7 @@ class WXPathEngine(HookedEngineBase):
                                 "body": resp.body
                             }
 
-                        if is_terminal():
+                        if await is_terminal():
                             break
                         continue
 
@@ -308,7 +310,7 @@ class WXPathEngine(HookedEngineBase):
                                 "status": resp.status,
                                 "body": resp.body
                             }
-                        if is_terminal():
+                        if await is_terminal():
                             break
                         continue
 
@@ -325,13 +327,13 @@ class WXPathEngine(HookedEngineBase):
                                 "body": resp.body
                             }
 
-                        if is_terminal():
+                        if await is_terminal():
                             break
                         continue
 
                     body = await self.post_fetch_hooks(resp.body, task)
                     if not body:
-                        if is_terminal():
+                        if await is_terminal():
                             break
                         continue
 
@@ -345,7 +347,7 @@ class WXPathEngine(HookedEngineBase):
 
                     elem = await self.post_parse_hooks(elem, task)
                     if elem is None:
-                        if is_terminal():
+                        if await is_terminal():
                             break
                         continue
 
@@ -355,7 +357,7 @@ class WXPathEngine(HookedEngineBase):
                             elem=elem,
                             depth=task.depth,
                             max_depth=max_depth,
-                            queue=queue,
+                            frontier=frontier,
                             pbar=pbar
                         ):  
                             total_yielded += 1
@@ -370,20 +372,24 @@ class WXPathEngine(HookedEngineBase):
 
                         yield await self.post_extract_hooks(elem)
 
+                    # Mark this URL fully processed (enables resume for durable backends).
+                    await frontier.mark_done(task.url)
+
                     # Termination condition
-                    if is_terminal():
+                    if await is_terminal():
                         break
             finally:
                 # Ensure the background submitter task is cancelled and awaited
                 # before the crawler context (and the surrounding event loop in
                 # wxpath_async_blocking_iter) tears down. If the consumer stops
                 # iterating early, this async generator is closed via GeneratorExit
-                # while submitter() is still awaiting queue.get(); without cancelling
+                # while submitter() is still awaiting frontier.pop(); without cancelling
                 # it here the task is later destroyed against a closed loop, raising
                 # "RuntimeError: Event loop is closed".
                 submit_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await submit_task
+                await frontier.close()
 
         if pbar is not None:
             pbar.close()
@@ -394,7 +400,7 @@ class WXPathEngine(HookedEngineBase):
         elem: Any, 
         depth: int,
         max_depth: int,
-        queue: asyncio.Queue[CrawlTask],
+        frontier: Frontier,
         pbar: tqdm = None
     ) -> AsyncGenerator[Any, None]:
         """Process a queue of intents for a single crawl branch.
@@ -407,7 +413,7 @@ class WXPathEngine(HookedEngineBase):
             elem: Current DOM element (or extracted value) being processed.
             depth: Current traversal depth.
             max_depth: Maximum permitted crawl depth.
-            queue: Shared crawl queue for enqueuing downstream URLs.
+            frontier: Shared frontier for enqueuing downstream URLs.
 
         Yields:
             object: Extracted values or processed elements as produced by operators.
@@ -432,12 +438,12 @@ class WXPathEngine(HookedEngineBase):
 
                 elif isinstance(intent, CrawlIntent):
                     next_depth = task.depth + 1
-                    # if intent.url not in self.seen_urls and next_depth <= max_depth:
-                    if next_depth <= max_depth and intent.url not in self.seen_urls:
-                        # self.seen_urls.add(intent.url)
+                    if next_depth <= max_depth:
+                        # Dedup is enforced inside frontier.push(); a URL discovered on
+                        # multiple pages is queued at most once (first discovery wins).
                         log.debug(f"Depth: {next_depth}; Enqueuing {intent.url}")
                         
-                        queue.put_nowait(
+                        pushed = await frontier.push(
                             CrawlTask(
                                 elem=None,
                                 url=intent.url,
@@ -446,7 +452,7 @@ class WXPathEngine(HookedEngineBase):
                                 backlink=task.url,
                             )
                         )
-                        if pbar is not None:
+                        if pushed and pbar is not None:
                             pbar.total += 1
                             pbar.refresh()
 

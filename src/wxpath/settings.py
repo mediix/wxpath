@@ -66,6 +66,18 @@ SETTINGS = {
                 'auto_throttle_max_delay': 10.0,
                 'respect_robots': True,
             },
+            'frontier': {
+                'backend': "memory",      # memory | sqlite | redis
+                'resume': False,          # reattach to an existing frontier vs reset
+                'poll_interval': 0.02,    # seconds; sqlite/redis empty-queue poll cadence
+                'sqlite': {
+                    'path': ".wxpath_frontier.db",
+                },
+                'redis': {
+                    'address': 'redis://localhost:6379/0',
+                    'namespace': "wxpath:frontier",
+                },
+            },
         },
     },
 }
@@ -108,3 +120,4 @@ class AttrDict(dict):
 SETTINGS = AttrDict(SETTINGS)
 CACHE_SETTINGS = SETTINGS.http.client.cache
 CRAWLER_SETTINGS = SETTINGS.http.client.crawler
+FRONTIER_SETTINGS = SETTINGS.http.client.frontier
