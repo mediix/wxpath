@@ -36,6 +36,8 @@ share
 
 venv
 
+.venv
+
 pyvenv.cfg
 
 *.zip
@@ -43,6 +45,14 @@ pyvenv.cfg
 .claude
 .serena
 
+# local agent/tooling state (not part of the project)
+.gcli
+.lean-ctx
+
 # mkdocs-resize-images: large source images and cache
 assets/images-large
 .resize-hash
+
+# benchmark run outputs (keep the dir via .gitkeep)
+benchmarks/results/*
+!benchmarks/results/.gitkeep

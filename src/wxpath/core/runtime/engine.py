@@ -251,131 +251,139 @@ class WXPathEngine(HookedEngineBase):
 
             submit_task = asyncio.create_task(submitter())
 
-            # Seed the pipeline with a dummy task
-            seed_task = CrawlTask(
-                elem=None,
-                url=None,
-                segments=bin_or_segs,
-                depth=-1,
-                backlink=None,
-            )
-            async for output in self._process_pipeline(
-                task=seed_task,
-                elem=None,
-                depth=seed_task.depth,
-                max_depth=max_depth,
-                queue=queue,
-                pbar=pbar,
-            ):
-                yield await self.post_extract_hooks(output)
-
-            # While looping asynchronous generators, you MUST make sure 
-            # to check terminal conditions before re-iteration.
-            async for resp in crawler:
-                if pbar is not None:
-                    pbar.update(1)
-                    pbar.refresh()
-
-                task = inflight.pop(resp.request.url, None)
-                pending_tasks -= 1
-
-                if task is None:
-                    log.warning(f"Got unexpected response from {resp.request.url}")
-
-                    if yield_errors:
-                        yield {
-                            "__type__": "error",
-                            "url": resp.request.url,
-                            "reason": "unexpected_response",
-                            "status": resp.body,
-                            "body": resp.body
-                        }
-                        
-                    if is_terminal():
-                        break
-                    continue
-
-                if resp.error:
-                    log.warning(f"Got error from {resp.request.url}: {resp.error}")
-
-                    if yield_errors:
-                        yield {
-                            "__type__": "error",
-                            "url": resp.request.url,
-                            "reason": "network_error",
-                            "exception": str(resp.error),
-                            "status": resp.status,
-                            "body": resp.body
-                        }
-                    if is_terminal():
-                        break
-                    continue
-
-                # NOTE: Consider allowing redirects
-                if resp.status not in self.allowed_response_codes or not resp.body:
-                    log.warning(f"Got non-200 response from {resp.request.url}")
-
-                    if yield_errors:
-                        yield {
-                            "__type__": "error",
-                            "url": resp.request.url,
-                            "reason": "bad_status",
-                            "status": resp.status,
-                            "body": resp.body
-                        }
-
-                    if is_terminal():
-                        break
-                    continue
-
-                body = await self.post_fetch_hooks(resp.body, task)
-                if not body:
-                    if is_terminal():
-                        break
-                    continue
-
-                elem = parse_html(
-                    body,
-                    base_url=task.url,
-                    backlink=task.backlink,
-                    depth=task.depth,
-                    response=resp
+            try:
+                # Seed the pipeline with a dummy task
+                seed_task = CrawlTask(
+                    elem=None,
+                    url=None,
+                    segments=bin_or_segs,
+                    depth=-1,
+                    backlink=None,
                 )
+                async for output in self._process_pipeline(
+                    task=seed_task,
+                    elem=None,
+                    depth=seed_task.depth,
+                    max_depth=max_depth,
+                    queue=queue,
+                    pbar=pbar,
+                ):
+                    yield await self.post_extract_hooks(output)
 
-                elem = await self.post_parse_hooks(elem, task)
-                if elem is None:
-                    if is_terminal():
-                        break
-                    continue
+                # While looping asynchronous generators, you MUST make sure 
+                # to check terminal conditions before re-iteration.
+                async for resp in crawler:
+                    if pbar is not None:
+                        pbar.update(1)
+                        pbar.refresh()
 
-                if task.segments:
-                    async for output in self._process_pipeline(
-                        task=task,
-                        elem=elem,
+                    task = inflight.pop(resp.request.url, None)
+                    pending_tasks -= 1
+
+                    if task is None:
+                        log.warning(f"Got unexpected response from {resp.request.url}")
+
+                        if yield_errors:
+                            yield {
+                                "__type__": "error",
+                                "url": resp.request.url,
+                                "reason": "unexpected_response",
+                                "status": resp.body,
+                                "body": resp.body
+                            }
+
+                        if is_terminal():
+                            break
+                        continue
+
+                    if resp.error:
+                        log.warning(f"Got error from {resp.request.url}: {resp.error}")
+
+                        if yield_errors:
+                            yield {
+                                "__type__": "error",
+                                "url": resp.request.url,
+                                "reason": "network_error",
+                                "exception": str(resp.error),
+                                "status": resp.status,
+                                "body": resp.body
+                            }
+                        if is_terminal():
+                            break
+                        continue
+
+                    # NOTE: Consider allowing redirects
+                    if resp.status not in self.allowed_response_codes or not resp.body:
+                        log.warning(f"Got non-200 response from {resp.request.url}")
+
+                        if yield_errors:
+                            yield {
+                                "__type__": "error",
+                                "url": resp.request.url,
+                                "reason": "bad_status",
+                                "status": resp.status,
+                                "body": resp.body
+                            }
+
+                        if is_terminal():
+                            break
+                        continue
+
+                    body = await self.post_fetch_hooks(resp.body, task)
+                    if not body:
+                        if is_terminal():
+                            break
+                        continue
+
+                    elem = parse_html(
+                        body,
+                        base_url=task.url,
+                        backlink=task.backlink,
                         depth=task.depth,
-                        max_depth=max_depth,
-                        queue=queue,
-                        pbar=pbar
-                    ):  
+                        response=resp
+                    )
+
+                    elem = await self.post_parse_hooks(elem, task)
+                    if elem is None:
+                        if is_terminal():
+                            break
+                        continue
+
+                    if task.segments:
+                        async for output in self._process_pipeline(
+                            task=task,
+                            elem=elem,
+                            depth=task.depth,
+                            max_depth=max_depth,
+                            queue=queue,
+                            pbar=pbar
+                        ):  
+                            total_yielded += 1
+                            if pbar is not None:
+                                pbar.set_postfix(yielded=total_yielded, depth=task.depth,)
+
+                            yield await self.post_extract_hooks(output)
+                    else:
                         total_yielded += 1
                         if pbar is not None:
                             pbar.set_postfix(yielded=total_yielded, depth=task.depth,)
 
-                        yield await self.post_extract_hooks(output)
-                else:
-                    total_yielded += 1
-                    if pbar is not None:
-                        pbar.set_postfix(yielded=total_yielded, depth=task.depth,)
+                        yield await self.post_extract_hooks(elem)
 
-                    yield await self.post_extract_hooks(elem)
-
-                # Termination condition
-                if is_terminal():
-                    break
-
-            submit_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await submit_task
+                    # Termination condition
+                    if is_terminal():
+                        break
+            finally:
+                # Ensure the background submitter task is cancelled and awaited
+                # before the crawler context (and the surrounding event loop in
+                # wxpath_async_blocking_iter) tears down. If the consumer stops
+                # iterating early, this async generator is closed via GeneratorExit
+                # while submitter() is still awaiting queue.get(); without cancelling
+                # it here the task is later destroyed against a closed loop, raising
+                # "RuntimeError: Event loop is closed".
+                submit_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await submit_task
 
         if pbar is not None:
             pbar.close()
@@ -496,8 +504,26 @@ def wxpath_async_blocking_iter(
             except StopAsyncIteration:
                 break
     finally:
-        loop.run_until_complete(loop.shutdown_asyncgens())
-        loop.close()
+        # Tear the loop down cleanly even when the consumer stops iterating
+        # early. Explicitly close the async generator first so its `finally`
+        # blocks run (cancelling the engine's background submitter task) while
+        # the loop is still alive, then cancel any stragglers and shut down
+        # remaining async generators before closing. Skipping this leaves
+        # pending tasks to be destroyed against a closed loop, raising
+        # "RuntimeError: Event loop is closed".
+        try:
+            loop.run_until_complete(agen.aclose())
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
 
 
 def wxpath_async_blocking(

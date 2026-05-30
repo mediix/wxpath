@@ -1,0 +1,13 @@
+# wxpath benchmark seed corpus — Python documentation.
+# Picked for stability, robots-friendliness, and consistent HTML structure.
+# Lines beginning with '#' are ignored. Empty lines are ignored.
+https://docs.python.org/3/
+https://docs.python.org/3/tutorial/index.html
+https://docs.python.org/3/library/index.html
+https://docs.python.org/3/reference/index.html
+https://docs.python.org/3/howto/index.html
+https://docs.python.org/3/faq/index.html
+https://docs.python.org/3/whatsnew/index.html
+https://docs.python.org/3/library/asyncio.html
+https://docs.python.org/3/library/typing.html
+https://docs.python.org/3/library/dataclasses.html

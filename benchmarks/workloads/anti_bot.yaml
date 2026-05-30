@@ -1,0 +1,26 @@
+name: anti_bot_tiers
+kind: anti_bot
+runnable: false
+description: 10-tier anti-bot stress test (plain, Cloudflare, Akamai, PerimeterX, DataDome, Kasada, reCAPTCHA, ...).
+seeds:
+  type: file
+  path: ../corpora/anti_bot_targets.txt
+path_expr: "//title/text()"
+max_depth: 1
+limits:
+  max_urls: 500
+  wall_clock_seconds: 1800
+settings_overrides:
+  http.client.crawler.concurrency: 8
+  http.client.crawler.per_host: 1
+  http.client.crawler.respect_robots: false   # adversarial scope; opt-in
+  http.client.crawler.timeout: 30
+tags:
+  - adversarial
+  - antibot
+notes: |
+  Requires: (1) classification of response → anti-bot tier on success/fail,
+  (2) proxy/browser-rendering integration since wxpath's plain-aiohttp stack
+  defeats only the lowest tiers, (3) per-tier cost accounting. Adopts the
+  HashScraper 2026 / Spider methodology for tiered SLOs. Treat as a destination
+  target, not a v0 deliverable.

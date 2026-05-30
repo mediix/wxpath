@@ -43,10 +43,12 @@ test = ["pytest>=7.0", "pytest-asyncio>=0.23"]
 dev = ["ruff", "tox"]
 docs = ["mkdocs>=1.5", "mkdocs-material>=9.0", "mkdocstrings[python]>=0.24", "mkdocs-macros-plugin>=1.0", "mkdocs-resize-images>=1.0", "mkdocs-glightbox", "pyyaml>=6.0"]
 tui = ["textual>=1.0.0", "aiohttp-client-cache>=0.14.0", "aiohttp-client-cache[sqlite]"]
+bench = ["pyyaml>=6.0", "datasketch>=1.6", "numpy>=1.24"]
 
 [project.scripts]
 wxpath = "wxpath.cli:main"
 wxpath-tui = "wxpath.tui:main"
+wxpath-bench = "benchmarks.cli:main"
 
 [tool.pytest.ini_options]
 minversion = "6.0"
@@ -54,10 +56,38 @@ addopts = "-ra -q"
 testpaths = ["tests"]
 
 [tool.setuptools]
+# Two roots: src/ for wxpath, repo root for benchmarks. Each root has its own
+# explicit include to avoid setuptools picking up stale or sibling directories
+# (e.g. tests/, docs/, or pre-refactor leftovers at the repo top level).
+packages = [
+    "wxpath",
+    "wxpath.core",
+    "wxpath.core.runtime",
+    "wxpath.hooks",
+    "wxpath.http",
+    "wxpath.http.client",
+    "wxpath.http.policy",
+    "wxpath.integrations",
+    "wxpath.integrations.langchain",
+    "wxpath.util",
+    "benchmarks",
+]
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["wxpath", "wxpath.*"]
+[tool.setuptools.package-dir]
+wxpath = "src/wxpath"
+"wxpath.core" = "src/wxpath/core"
+"wxpath.core.runtime" = "src/wxpath/core/runtime"
+"wxpath.hooks" = "src/wxpath/hooks"
+"wxpath.http" = "src/wxpath/http"
+"wxpath.http.client" = "src/wxpath/http/client"
+"wxpath.http.policy" = "src/wxpath/http/policy"
+"wxpath.integrations" = "src/wxpath/integrations"
+"wxpath.integrations.langchain" = "src/wxpath/integrations/langchain"
+"wxpath.util" = "src/wxpath/util"
+benchmarks = "benchmarks"
+
+[tool.setuptools.package-data]
+benchmarks = ["workloads/*.yaml", "corpora/*.txt", "corpora/README.md", "README.md"]
 
 [tool.ruff]
 target-version = "py310"

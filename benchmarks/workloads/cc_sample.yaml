@@ -1,0 +1,25 @@
+name: cc_sample_100k
+kind: cc_sample
+runnable: false
+description: 100k URL random sample from a Common Crawl monthly snapshot.
+seeds:
+  type: manifest
+  path: ../corpora/cc_sample_manifest.yaml
+path_expr: "//title/text()"
+max_depth: 1
+limits:
+  max_urls: 100000
+  wall_clock_seconds: 7200
+settings_overrides:
+  http.client.crawler.concurrency: 32
+  http.client.crawler.per_host: 1
+  http.client.crawler.respect_robots: true
+  http.client.crawler.timeout: 15
+tags:
+  - sampling
+  - content-quality
+notes: |
+  Requires: (1) S3 access pattern for s3://commoncrawl/cc-index/collections/<CC-MAIN>/indexes/,
+  (2) HLL-based dedup expected to match CC's published HyperLogLog estimates
+  within 10%, (3) MIME-type distribution comparison harness. Validates real-world
+  content quality, not single-site behaviour.
