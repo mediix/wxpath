@@ -10,7 +10,7 @@ import pytest
 from wxpath.core.models import CrawlTask
 from wxpath.http.frontier.memory import InMemoryFrontier
 
-BACKENDS = ["memory"]
+BACKENDS = ["memory", "sqlite"]
 
 
 def _task(url: str, depth: int = 0) -> CrawlTask:
