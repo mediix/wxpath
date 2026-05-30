@@ -2,11 +2,24 @@
 
 > **Branch:** `feat/m1-pluggable-frontier`
 > **Parent:** [FRONTIER_ROADMAP.md §M1](../FRONTIER_ROADMAP.md#m1--pluggable-persistent-frontier-backend)
-> **Status:** Ready to implement. Self-contained; depends only on M0 (already landed:
-> engine teardown fix in `33890c5`).
+> **Status:** ✅ **IMPLEMENTED.** memory + sqlite + redis backends, engine wired,
+> tests green (236 total). Depends on M0 (engine teardown fix, `33890c5`).
 > **Prime directive:** ship the abstraction *dark* — with `backend: memory` the
 > engine must behave **byte-identically** to today (Invariant I5). All later moves
 > (M2 priority, M3 scoring, M6 dedup, M7 host-fairness) plug into this interface.
+>
+> **Deviations from this sketch, resolved during implementation (code is truth):**
+> - **Ordering:** M1 pops by `discovery_seq ASC` (pure FIFO == BFS), *not*
+>   `priority DESC`. The `priority` column is stored but unused until M2, which also
+>   decides its direction (wxpath's `models.py` convention is *lower = higher
+>   priority*, the inverse of the roadmap sketch). See §4.2.
+> - **SQLite concurrency:** synchronous `sqlite3` on the single event-loop thread —
+>   **no** `asyncio.Lock`, **no** `asyncio.to_thread`, **no** `aiosqlite` dependency
+>   (methods contain no `await` between connection access). See §4.2.
+> - **Engine wiring:** the frontier is instantiated **per `run()`** from
+>   `self._injected_frontier or get_frontier_backend()` (matching the historical
+>   per-run `queue` lifecycle), not stored once in `__init__`. `is_terminal()` had
+>   **6** call-sites (not 5).
 
 ---
 
@@ -183,25 +196,41 @@ CREATE TABLE IF NOT EXISTS frontier (
     backlink       TEXT,
     segments       BLOB                      -- pickled CrawlTask.segments (next expr)
 );
-CREATE INDEX IF NOT EXISTS ix_pop ON frontier (state, priority DESC, discovery_seq ASC);
+CREATE INDEX IF NOT EXISTS ix_pop ON frontier (state, discovery_seq);
 ```
+
+> **Ordering decision (resolved during implementation).** M1 orders by
+> `discovery_seq ASC` — **pure FIFO**, which reproduces the in-memory queue's BFS
+> order exactly (`discovery_seq` is monotonic with crawl depth: every depth-*d*
+> task is discovered, and thus assigned a lower seq, before any depth-*(d+1)* task).
+> The `priority` column is persisted but **not** consulted in the ORDER BY yet —
+> **M2** adds the priority term and resolves its *direction* against wxpath's
+> existing convention (`models.py`: *lower number = higher priority*), which is the
+> opposite of the "higher = more important" convention in the roadmap sketch. M1
+> deliberately avoids baking in a direction.
 
 Operation → SQL:
 
 | Method | SQL |
 |---|---|
 | `push` | `INSERT OR IGNORE INTO frontier(url,state,priority,depth,discovery_seq,backlink,segments) VALUES (?, 'queued', ?, ?, ?, ?, ?)` → return `cursor.rowcount == 1` (IGNORE on existing PK = dedup) |
-| `pop` | `SELECT url,depth,backlink,segments FROM frontier WHERE state='queued' ORDER BY priority DESC, discovery_seq ASC LIMIT 1`; then `UPDATE frontier SET state='inflight' WHERE url=?` — single transaction. If no row: `await asyncio.sleep(poll_interval)` and retry; return None once `_closed`. |
+| `pop` | `SELECT url,depth,backlink,segments FROM frontier WHERE state='queued' ORDER BY discovery_seq ASC LIMIT 1`; then `UPDATE frontier SET state='inflight' WHERE url=?`. If no row: `await asyncio.sleep(poll_interval)` and retry; return None once `_closed`. |
 | `mark_done` | `UPDATE frontier SET state='done' WHERE url=?` |
 | `seen` | `SELECT 1 FROM frontier WHERE url=? LIMIT 1` (any state) |
 | `size` | `SELECT COUNT(*) FROM frontier WHERE state='queued'` |
 | `checkpoint` | `COMMIT` / `PRAGMA wal_checkpoint(TRUNCATE)` |
 
-**Concurrency model.** wxpath runs **one** submitter coroutine, so DB access is
-effectively serialized; use a single connection guarded by an `asyncio.Lock`, run the
-blocking `sqlite3` calls via `asyncio.to_thread` (or `aiosqlite`). `discovery_seq` is an
-in-process monotonic counter seeded from `SELECT COALESCE(MAX(discovery_seq),-1)+1` at
-open (so resume continues the sequence).
+**Concurrency model (resolved during implementation).** Every method does its
+SQLite work **synchronously** with no `await` between touching the connection and
+returning, and wxpath drives the engine on a single event loop — so two coroutines
+can never use the connection at once. **No `asyncio.Lock` and no `asyncio.to_thread`
+are needed.** Only `pop` awaits, and only on `asyncio.sleep` *between* probes (never
+mid-statement), so it never holds the connection across a suspension. (SQLite ops on
+a local WAL file are sub-millisecond; the brief loop-block is dwarfed by network I/O,
+and the default benchmark backend is `memory` anyway.) `discovery_seq` is an
+in-process counter seeded from `SELECT COALESCE(MAX(discovery_seq),-1)+1` at open (so
+resume continues the sequence); it is incremented only on a successful (non-deduped)
+insert.
 
 **Resume.** On open with `resume: true`, run
 `UPDATE frontier SET state='queued' WHERE state='inflight'` — interrupted fetches return
@@ -479,10 +508,14 @@ cd /tmp && PYTHONPATH="$R/src:$R" "$R/.venv/bin/python" -m pytest \
 - `src/wxpath/settings.py` — add `frontier` block + `FRONTIER_SETTINGS`.
 - `src/wxpath/core/runtime/engine.py` — the 5 edits in §6.
 - `pyproject.toml` — add `frontier-redis = ["redis>=5.0"]` optional extra (sqlite is
-  stdlib; no core dep added). Add `aiosqlite>=0.19` only if not using `asyncio.to_thread`.
-- `tests/benchmarks/test_local_fixture.py` — add the SQLite-parity case (§8.5).
-- `FRONTIER_ROADMAP.md` — link M1 section to this plan; tick M1 once merged.
-- `DESIGN.md` — append I5–I7 (optional in M1; can defer to M2).
+  stdlib, no core dep added; `aiosqlite` not needed — see §4.2 concurrency note).
+- `FRONTIER_ROADMAP.md` — link M1 section to this plan (done).
+- `DESIGN.md` — append I5–I7 (deferred to M2, when priority makes them load-bearing).
+
+**Deferred (not blocking M1 acceptance):** the driver-level benchmark SQLite-parity
+run (§8.5) — the engine-level parity test (§8.4, `test_engine_frontier_parity.py`)
+already proves memory ≡ sqlite coverage through the real crawl pipeline; the
+driver-level variant only adds settings-plumbing coverage and needs a temp DB path.
 
 ---
 
@@ -491,7 +524,7 @@ cd /tmp && PYTHONPATH="$R/src:$R" "$R/.venv/bin/python" -m pytest \
 | Risk | Likelihood | Mitigation |
 |---|---|---|
 | AST `segments` not picklable | low–med | Unit test §8.3 up front; fallback = persist seed expr string + re-derive. Gate `PRAGMA user_version`. |
-| SQLite write throughput on hot loopback crawl | med | WAL + single-connection + `to_thread`; batch nothing in M1 (single submitter ⇒ low write rate). Benchmark both backends; memory stays default. |
+| SQLite write throughput on hot loopback crawl | med | WAL + single connection, synchronous (single submitter ⇒ low, serialized write rate). Memory stays the default; sqlite is opt-in for resume. |
 | `is_terminal()` becoming async introduces a race at drain | low | Keep `pending_tasks` engine-local and decremented before the terminal check, exactly as today; only `size()` moves behind await. |
 | Poll-loop latency on sqlite/redis empty queue | low | `poll_interval` default 20ms; only matters when the frontier momentarily empties mid-crawl. Memory backend (default) blocks, no poll. |
 | Hidden second use of `seen_urls` elsewhere | low | Grep confirms `seen_urls` is referenced only in `engine.py`; retire fully. |
@@ -519,10 +552,13 @@ memory; kill-and-resume on sqlite completes the same page-set with zero re-fetch
 
 ## 12. Acceptance criteria (from the roadmap, concretized)
 
-- [ ] `backend: memory` ⇒ `local_fixture` yields byte-identical coverage/extraction vs
-      pre-M1 (`pages_completed=512`, the pinned depth histogram, `extracted_total=511`).
-- [ ] `backend: sqlite`, `resume: true`: kill the process at N pages, restart, crawl
-      completes the **same total page-set** with **no re-fetch** (verified via `mark_done`
-      / `seen` state).
-- [ ] `engine.seen_urls` is retired; the frontier is the sole owner of dedup state (I7).
-- [ ] Switching backends is a pure settings change — no engine/operator/DSL edits.
+- [x] `backend: memory` ⇒ `local_fixture` yields byte-identical coverage/extraction vs
+      pre-M1 (`pages_completed=512`, depth `d0:1 d1:4 d2:16 d3:64 d4:256 d5:171`,
+      `extracted_total=511`) — confirmed by a full 512-page bench run + `test_local_fixture`.
+- [x] `backend: sqlite` resume: pop+`mark_done` some, interrupt others, reopen with
+      `resume=True` → interrupted URLs re-queued, completed never re-fetched
+      (`test_sqlite_resume.py`).
+- [x] `engine.seen_urls` is retired; the frontier is the sole owner of dedup state (I7).
+- [x] Switching backends is a pure settings change — `test_factory.py` (settings →
+      backend type) + `test_engine_frontier_parity.py` (sqlite yields the same crawl
+      through the unchanged engine).

@@ -44,6 +44,7 @@ dev = ["ruff", "tox"]
 docs = ["mkdocs>=1.5", "mkdocs-material>=9.0", "mkdocstrings[python]>=0.24", "mkdocs-macros-plugin>=1.0", "mkdocs-resize-images>=1.0", "mkdocs-glightbox", "pyyaml>=6.0"]
 tui = ["textual>=1.0.0", "aiohttp-client-cache>=0.14.0", "aiohttp-client-cache[sqlite]"]
 bench = ["pyyaml>=6.0", "datasketch>=1.6", "numpy>=1.24"]
+frontier-redis = ["redis>=5.0"]
 
 [project.scripts]
 wxpath = "wxpath.cli:main"

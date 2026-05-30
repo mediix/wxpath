@@ -11,8 +11,6 @@ import pytest
 
 from wxpath.core import parser
 from wxpath.core.models import CrawlIntent
-from wxpath.core.runtime.engine import WXPathEngine
-from wxpath.http.frontier.memory import InMemoryFrontier
 
 
 EXPRESSIONS = [
