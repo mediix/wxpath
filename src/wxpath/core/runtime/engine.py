@@ -442,7 +442,12 @@ class WXPathEngine(HookedEngineBase):
                         # Dedup is enforced inside frontier.push(); a URL discovered on
                         # multiple pages is queued at most once (first discovery wins).
                         log.debug(f"Depth: {next_depth}; Enqueuing {intent.url}")
-                        
+
+                        # M3: the DSL `priority=` is "higher = sooner", but the
+                        # frontier is min-first (lower = sooner), so negate. An
+                        # unscored link (score is None) leaves priority unset, so
+                        # CrawlTask defaults it to depth → BFS preserved (I5).
+                        priority = -intent.score if intent.score is not None else None
                         pushed = await frontier.push(
                             CrawlTask(
                                 elem=None,
@@ -450,6 +455,7 @@ class WXPathEngine(HookedEngineBase):
                                 segments=intent.next_segments,
                                 depth=next_depth,
                                 backlink=task.url,
+                                priority=priority,
                             )
                         )
                         if pushed and pbar is not None:

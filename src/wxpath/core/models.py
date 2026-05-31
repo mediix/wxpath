@@ -48,6 +48,11 @@ class Result(Intent):
 class CrawlIntent(Intent):
     url: str             # "I found this link"
     next_segments: list  # "Here is what to do next if you go there"
+    # M3: per-link priority from a `priority=` expression (higher = sooner).
+    # None means "unscored" → the engine falls back to depth (BFS, Invariant I5).
+    # The engine negates this into CrawlTask.priority (lower = popped sooner).
+    score: float | None = None
+    # provenance: "Provenance | None" = None   # ← M4
 
 
 @dataclass(slots=True)

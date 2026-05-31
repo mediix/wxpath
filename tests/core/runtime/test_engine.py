@@ -54,6 +54,95 @@ class _FakeCrawlerWithStatus:
 # --------------------------------------------------------------------------- #
 # Tests
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# M3 — declarative scoring (priority=) end-to-end
+# --------------------------------------------------------------------------- #
+# A page whose links are in document order low, high, mid but carry data-rank
+# 1, 9, 5. Pure BFS fetches them in document order; a priority= score reorders
+# the frontier so the highest-ranked page is fetched first.
+_SCORING_PAGES = {
+    'http://test/': b"""<html><body>
+        <a href="low.html"  data-rank="1">low</a>
+        <a href="high.html" data-rank="9">high</a>
+        <a href="mid.html"  data-rank="5">mid</a>
+    </body></html>""",
+    'http://test/low.html':  b"<html><body><p>low</p></body></html>",
+    'http://test/high.html': b"<html><body><p>high</p></body></html>",
+    'http://test/mid.html':  b"<html><body><p>mid</p></body></html>",
+}
+
+
+def _run_scoring(monkeypatch, expr, max_depth=1):
+    monkeypatch.setattr(
+        engine, "Crawler",
+        lambda *a, **k: MockCrawler(*a, pages=_SCORING_PAGES, **k),
+    )
+    return asyncio.run(_collect_async(engine.WXPathEngine().run(expr, max_depth=max_depth)))
+
+
+def test_engine_priority_orders_fetches(monkeypatch):
+    """Dynamic priority=: highest @data-rank is fetched first (not doc order)."""
+    expr = "url('http://test/')//url(//a/@href, priority=number(./@data-rank))"
+    results = _run_scoring(monkeypatch, expr)
+    assert [e.base_url for e in results] == [
+        "http://test/high.html",  # rank 9
+        "http://test/mid.html",   # rank 5
+        "http://test/low.html",   # rank 1
+    ]
+
+
+def test_engine_constant_priority_keeps_bfs_order(monkeypatch):
+    """A constant priority= ties every link, so the seq tiebreak ⇒ BFS order."""
+    expr = "url('http://test/')//url(//a/@href, priority=5)"
+    results = _run_scoring(monkeypatch, expr)
+    assert [e.base_url for e in results] == [
+        "http://test/low.html",
+        "http://test/high.html",
+        "http://test/mid.html",
+    ]
+
+
+def test_engine_no_priority_is_pure_bfs(monkeypatch):
+    """Regression / I5: no priority= ⇒ document (BFS) order, unchanged."""
+    expr = "url('http://test/')//url(//a/@href)"
+    results = _run_scoring(monkeypatch, expr)
+    assert [e.base_url for e in results] == [
+        "http://test/low.html",
+        "http://test/high.html",
+        "http://test/mid.html",
+    ]
+
+
+def test_engine_priority_is_deterministic(monkeypatch):
+    """Same page + same expression ⇒ identical order on every run."""
+    expr = "url('http://test/')//url(//a/@href, priority=number(./@data-rank))"
+    first = [e.base_url for e in _run_scoring(monkeypatch, expr)]
+    second = [e.base_url for e in _run_scoring(monkeypatch, expr)]
+    assert first == second == [
+        "http://test/high.html", "http://test/mid.html", "http://test/low.html"]
+
+
+def test_engine_priority_changes_order_not_data(monkeypatch):
+    """Invariant I4: scoring changes traversal ORDER, never extracted DATA.
+
+    The same pages are visited and the same map{} is extracted regardless of
+    priority; only the order differs.
+    """
+    tail = "/map { 'p': string((//p/text())[1]) }"
+    scored = _run_scoring(
+        monkeypatch,
+        "url('http://test/')//url(//a/@href, priority=number(./@data-rank))" + tail)
+    bfs = _run_scoring(
+        monkeypatch, "url('http://test/')//url(//a/@href)" + tail)
+
+    scored = [dict(r.items()) for r in scored]
+    bfs = [dict(r.items()) for r in bfs]
+
+    assert scored != bfs                       # order differs...
+    assert sorted(map(repr, scored)) == sorted(map(repr, bfs))  # ...data identical
+    assert scored[0] == {"p": "high"}          # high-rank page extracted first
+
+
 def test_engine_run__crawl(monkeypatch):
     """A single `url()` segment should yield the parsed root element."""
     pages = {

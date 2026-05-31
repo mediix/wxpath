@@ -24,6 +24,7 @@ TOKEN_SPEC = [
     # ("NAME",     r"[a-zA-Z_][a-zA-Z0-9_]*"),
     ("FOLLOW",   r",?\s{,}follow="),
     ("DEPTH",    r",?\s{,}depth="),
+    ("PRIORITY", r",?\s{,}priority="),  # M3: per-link scoring (higher = sooner)
     ("OP",       r"\|\||<=|>=|!=|=|<|>|\+|-|\*|/|!"),  # Added || for string concat
     ("LPAREN",   r"\("),
     ("RPAREN",   r"\)"),
@@ -72,6 +73,19 @@ class Integer:
 @dataclass
 class Depth(Integer):
     pass
+
+@dataclass
+class Score:
+    """M3 ``priority=`` argument on a url() segment.
+
+    ``expr`` is the raw text after ``priority=`` — either a numeric literal or an
+    XPath expression evaluated per discovered link against its anchor element.
+    ``const`` is set iff ``expr`` is a pure numeric literal (the static-weight
+    fast path: no anchor evaluation needed). Convention: higher value = crawled
+    sooner (the engine negates it into its min-first priority space).
+    """
+    expr: str
+    const: float | None = None
 
 @dataclass
 class String:
@@ -373,119 +387,100 @@ class Parser:
         
         return result
 
-    def capture_url_arg_content(self) -> list[Call | Xpath | ContextItem]:
+    def capture_url_arg_content(self) -> list:
         """Capture content inside a url() call, handling nested wxpath expressions.
 
         Supports patterns like::
 
-            url('...')                          -> [String]
-            url('...' follow=//a/@href)         -> [String, Xpath]
-            url('...' follow=//a/@href depth=2) -> [String, Xpath, Integer]
-            url(//a/@href depth=2)              -> [Xpath, Integer]
-            url( url('..')//a/@href )           -> [Call, Xpath]
-            url( url( url('..')//a )//b )       -> [Call, Xpath]
+            url('...')                            -> [String]
+            url('...' follow=//a/@href)           -> [String, Xpath]
+            url('...' follow=//a/@href depth=2)   -> [String, Xpath, Integer]
+            url(//a/@href depth=2)                -> [Xpath, Integer]
+            url(//a/@href priority=10)            -> [Xpath, Score]    (M3)
+            url(//a/@href priority=number(@rank)) -> [Xpath, Score]    (M3)
+            url( url('..')//a/@href )             -> [Call, Xpath]
+            url( url( url('..')//a )//b )         -> [Call, Xpath]
 
         Returns:
             A list of parsed elements: Xpath nodes for xpath content and Call
-            nodes for nested url() calls.
+            nodes for nested url() calls, plus an optional trailing Depth and/or
+            Score (from ``depth=`` / ``priority=``).
         """
         elements = []
-        current_xpath = ""
         paren_balance = 1  # We're already inside the opening paren of url()
         brace_balance = 0  # Track braces for map constructors
-        reached_follow_token = False
-        reached_depth_token = False
-        follow_xpath = ""
-        depth_number = ""
+
+        # Tokens after a follow=/depth=/priority= marker accumulate into that
+        # named buffer; everything before the first marker is the primary xpath
+        # argument. A marker switches the active buffer (markers are mutually
+        # exclusive, matching the legacy follow/depth toggle).
+        buffers = {"xpath": "", "follow": "", "depth": "", "priority": ""}
+        mode = "xpath"
 
         while paren_balance > 0 and self.token.type != "EOF":
-            if self.token.type == "WXPATH":
-                # Found nested wxpath: save any accumulated xpath content first
-                if current_xpath.strip():
-                    elements.append(Xpath(current_xpath.strip()))
-                    current_xpath = ""
-                
-                # Parse the nested url() call using nud()
-                # This recursively handles deeply nested wxpath
+            ttype = self.token.type
+
+            if ttype == "WXPATH":
+                # Found nested wxpath: flush any accumulated xpath content first,
+                # then parse the nested url() call (recurses via nud()).
+                if buffers["xpath"].strip():
+                    elements.append(Xpath(buffers["xpath"].strip()))
+                    buffers["xpath"] = ""
                 nested_call = self.nud()
                 if nested_call is not None:
                     elements.append(nested_call)
+                continue
 
-            elif self.token.type == "FOLLOW":
-                reached_follow_token = True
-                reached_depth_token = False
+            if ttype == "FOLLOW":
+                mode = "follow"
                 self.advance()
-
-            elif self.token.type == "DEPTH":
-                reached_depth_token = True
-                reached_follow_token = False
+                continue
+            if ttype == "DEPTH":
+                mode = "depth"
                 self.advance()
+                continue
+            if ttype == "PRIORITY":
+                mode = "priority"
+                self.advance()
+                continue
 
-            elif self.token.type == "LPAREN":
-                # Opening paren that's NOT part of a url() call
-                # (it's part of an xpath function like contains(), starts-with(), etc.)
+            # Track nesting so xpath functions like contains() and map { ... }
+            # constructors are captured whole. The closing paren of the outer
+            # url() ends the capture and is not itself consumed here.
+            if ttype == "LPAREN":
                 paren_balance += 1
-                if not reached_follow_token:
-                    current_xpath += self.token.value
-                else:
-                    follow_xpath += self.token.value
-                self.advance()
-                
-            elif self.token.type == "RPAREN":
+            elif ttype == "RPAREN":
                 paren_balance -= 1
                 if paren_balance == 0:
-                    # This is the closing paren of the outer url()
                     break
-                if not reached_follow_token:
-                    current_xpath += self.token.value
-                else:
-                    follow_xpath += self.token.value
-                self.advance()
-
-            elif self.token.type == "LBRACE":
-                # Opening brace for map constructors
+            elif ttype == "LBRACE":
                 brace_balance += 1
-                if not reached_follow_token:
-                    current_xpath += self.token.value
-                else:
-                    follow_xpath += self.token.value
-                self.advance()
-
-            elif self.token.type == "RBRACE":
+            elif ttype == "RBRACE":
                 brace_balance -= 1
-                if not reached_follow_token:
-                        current_xpath += self.token.value
-                else:
-                    follow_xpath += self.token.value
-                self.advance()
-                
-            else:
-                # Accumulate all other tokens as xpath content
-                if reached_follow_token:
-                    follow_xpath += self.token.value
-                elif reached_depth_token:
-                    depth_number += self.token.value
-                else:
-                    current_xpath += self.token.value
 
-                self.advance()
-        
+            buffers[mode] += self.token.value
+            self.advance()
+
         if paren_balance != 0:
             raise SyntaxError("unbalanced parentheses in url()")
-        
-        # Save any remaining xpath content
-        if current_xpath.strip():
-            current_xpath = current_xpath.strip()
-            if current_xpath == ".":
-                elements.append(ContextItem())
-            else:
-                elements.append(Xpath(current_xpath))
-        
-        if follow_xpath.strip():
-            elements.append(Xpath(follow_xpath.strip()))
 
-        if depth_number.strip():
-            elements.append(Depth(int(depth_number.strip())))
+        # Assemble in canonical order: xpath, follow, depth, priority.
+        primary = buffers["xpath"].strip()
+        if primary:
+            elements.append(ContextItem() if primary == "." else Xpath(primary))
+
+        if buffers["follow"].strip():
+            elements.append(Xpath(buffers["follow"].strip()))
+
+        if buffers["depth"].strip():
+            elements.append(Depth(int(buffers["depth"].strip())))
+
+        if buffers["priority"].strip():
+            expr = buffers["priority"].strip()
+            try:
+                elements.append(Score(expr, const=float(expr)))
+            except ValueError:
+                elements.append(Score(expr))
 
         return elements
 
@@ -507,6 +502,9 @@ class Parser:
                 if self.token.type == "DEPTH":
                     depth_arg = self.capture_url_arg_content()
                     args.extend(depth_arg)
+                if self.token.type == "PRIORITY":
+                    priority_arg = self.capture_url_arg_content()
+                    args.extend(priority_arg)
             elif self.token.type == "WXPATH":
                 # Nested wxpath: url( url('...')//a/@href ) or url( /url(...) )
                 # NOTE: We used to use capture_url_arg_content to handle nested wxpath and xpath
@@ -567,6 +565,12 @@ def _specify_call_types(func_name: str, args: list) -> Call | Segments:
                 segs = arg0
                 segs.append(arg1)
                 return Segments(segs)
+            elif isinstance(arg0, (Xpath, ContextItem)) and isinstance(arg1, Score):
+                # Example: url(//a/@href, priority=10) / url(., priority=…)
+                return UrlQuery(func_name, args)
+            elif isinstance(arg0, String) and isinstance(arg1, Score):
+                # Example: url('https://…', priority=10)  (static seed weight)
+                return UrlLiteral(func_name, args)
             else:
                 raise ValueError(f"Unknown arguments: {args}")
         elif len(args) == 3:
@@ -588,6 +592,10 @@ def _specify_call_types(func_name: str, args: list) -> Call | Segments:
                 return UrlQuery(func_name, args)
             else:
                 raise ValueError(f"Unknown argument type: {type(args[0])}")
+        elif (len(args) == 2 and isinstance(args[0], (Xpath, ContextItem))
+              and isinstance(args[1], Score)):
+            # Example: //url(@href, priority=number(./@data-rank))
+            return UrlQuery(func_name, args)
         else:
             raise ValueError(f"Unknown arguments: {args}")
     elif func_name == "///url":
@@ -596,6 +604,10 @@ def _specify_call_types(func_name: str, args: list) -> Call | Segments:
                 return UrlCrawl(func_name, args)
             else:
                 raise ValueError(f"Unknown argument type: {type(args[0])}")
+        elif (len(args) == 2 and isinstance(args[0], (Xpath, ContextItem))
+              and isinstance(args[1], Score)):
+            # Example: ///url(//a/@href, priority=count(./ancestor::article))
+            return UrlCrawl(func_name, args)
         else:
             raise ValueError(f"Unknown arguments: {args}")
     else:
