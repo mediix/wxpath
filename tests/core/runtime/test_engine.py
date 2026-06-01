@@ -1907,3 +1907,68 @@ def test_engine_shares_fetchcontext_across_fetch_and_parse(monkeypatch):
     assert paired, "post_parse hook never fired"
     assert all(paired.values()), f"fetch->parse pairing lost for: {paired}"
     assert all(same_object.values()), f"user_data dict not shared for: {same_object}"
+
+
+# --------------------------------------------------------------------------- #
+# M6 — URL canonicalization dedup (end-to-end acceptance)
+# --------------------------------------------------------------------------- #
+# A page links to /p/1, /p/1?utm_source=x, /p/1#section and /p/1/ — four raw URLs
+# that are the SAME page. With canonicalization enabled the frontier dedups them
+# to one canonical URL → exactly one fetch (FRONTIER_ROADMAP M6 acceptance). With
+# it off, each variant is fetched separately (the bug M6 fixes).
+class _CountingCrawler(MockCrawler):
+    """MockCrawler that records every submitted URL."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.fetched: list[str] = []
+
+    def submit(self, request):
+        self.fetched.append(request.url)
+        super().submit(request)
+
+
+_CANON_VARIANTS = {
+    "http://test/": (
+        b"<html><body>"
+        b"<a href='/p/1'>a</a>"
+        b"<a href='/p/1?utm_source=x'>b</a>"
+        b"<a href='/p/1#section'>c</a>"
+        b"<a href='/p/1/'>d</a>"
+        b"</body></html>"
+    ),
+    # Every raw variant has its own body so the control (canon OFF) fetches each.
+    "http://test/p/1": b"<html><body><p>one</p></body></html>",
+    "http://test/p/1?utm_source=x": b"<html><body><p>one</p></body></html>",
+    "http://test/p/1#section": b"<html><body><p>one</p></body></html>",
+    "http://test/p/1/": b"<html><body><p>one</p></body></html>",
+}
+
+
+def _run_canon(monkeypatch, *, enabled: bool):
+    crawler = _CountingCrawler(pages=_CANON_VARIANTS)
+    monkeypatch.setattr(engine, "Crawler", lambda *a, **k: crawler)
+    from wxpath.http import frontier as frontier_pkg
+    monkeypatch.setattr(frontier_pkg.FRONTIER_SETTINGS.canonical, "enabled", enabled)
+
+    eng = engine.WXPathEngine(crawler=crawler)
+    results = asyncio.run(
+        _collect_async(eng.run("url('http://test/')//url(//a/@href)", max_depth=1))
+    )
+    child_fetches = [u for u in crawler.fetched if "/p/1" in u]
+    return results, child_fetches
+
+
+def test_engine_canonical_dedups_url_variants(monkeypatch):
+    results, child_fetches = _run_canon(monkeypatch, enabled=True)
+    # All four variants collapse to one canonical fetch.
+    assert child_fetches == ["http://test/p/1"], child_fetches
+    assert len(results) == 1
+
+
+def test_engine_without_canonical_fetches_each_variant(monkeypatch):
+    # Control: with canonicalization off, every raw variant is a distinct fetch —
+    # demonstrating the wasted-fetch problem M6 eliminates.
+    _results, child_fetches = _run_canon(monkeypatch, enabled=False)
+    assert len(child_fetches) == 4
+    assert len(set(child_fetches)) == 4

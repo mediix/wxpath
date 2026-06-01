@@ -769,6 +769,14 @@ I10 (semantic order, M5): A semantic FrontierScorer affects traversal ORDER only
     (extends I5). A semantic crawl is reproducible given a pinned embedder, but
     coverage-under-budget is not guaranteed across embedder versions; the
     reproducibility gate runs scorer=deterministic.
+
+I11 (canonical dedup, M6): URL canonicalization is a pure function of the URL string
+    and is applied as a composable frontier wrapper that is absent unless
+    http.client.frontier.canonical.enabled. With it disabled the frontier object
+    graph is identical to pre-M6, so default crawls remain byte-reproducible
+    (extends I5). With it enabled, normalization collapses URL variants of the same
+    page to a single fetch — affecting which URLs are fetched, never the data
+    extracted from a given page (a realization of I4).
 ```
 
 ## What we deliberately will not do

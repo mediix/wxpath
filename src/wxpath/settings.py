@@ -86,6 +86,22 @@ SETTINGS = {
                     'max_path_repeat': 3,    # consecutive cycle repeats allowed before dropping
                     'max_period': 4,         # largest cycle length scanned for
                 },
+                # M6: URL canonicalization dedup. Off by default so the default
+                # frontier object graph is identical to pre-M6 and default crawls
+                # stay byte-identical (Invariant I5/I11). When enabled,
+                # get_frontier_backend() wraps the backend (outermost, ahead of any
+                # trap filter) in a CanonicalizingFrontier that normalizes each URL
+                # before dedup/admission. Structural normalization (lowercase
+                # scheme+host, strip default port) is always applied; the three
+                # toggles below cover reductions that can be semantic on some sites.
+                'canonical': {
+                    'enabled': False,                  # wrap backend with the canonicalizer
+                    # Query-param names to drop (case-insensitive globs). Never strip
+                    # unknown params by default — an arbitrary ?id=42 is usually semantic.
+                    'strip_params': ['utm_*', 'gclid', 'fbclid', 'sessionid', 'msclkid'],
+                    'drop_fragment': True,             # discard #fragment (client-side only)
+                    'normalize_trailing_slash': True,  # /p/1/ -> /p/1 (non-root)
+                },
                 # M5: pluggable frontier scoring. 'deterministic' (default) passes
                 # through the M3/M4 priority= score → engine enqueue path is identical
                 # to pre-M5 (Invariant I5/I10). 'semantic' orders links by relevance of
