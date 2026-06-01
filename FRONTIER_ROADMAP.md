@@ -751,6 +751,16 @@ I6: All default (non-semantic) scoring/dedup/provenance signals are pure functio
 
 I7: The frontier backend is the single source of truth for {queued, inflight, done,
     seen}. The engine holds no separate dedup set (seen_urls is retired).
+
+I8 (provenance, M4a): All link-provenance signals (anchor text, parent/section tag,
+    ancestor path, link density) are pure functions of the served HTML and the
+    anchor node — no network, clock, or RNG — so provenance-steered crawls remain
+    bit-reproducible (extends I6).
+
+I9 (trap admission, M4b): URL-path-repeat trap detection is a pure function of the
+    URL string and is applied as a composable frontier wrapper that is absent unless
+    http.client.frontier.trap.enabled. With it disabled the frontier object graph is
+    identical to pre-M4b, so default crawls remain byte-reproducible (extends I5).
 ```
 
 ## What we deliberately will not do

@@ -77,6 +77,15 @@ SETTINGS = {
                     'address': 'redis://localhost:6379/0',
                     'namespace': "wxpath:frontier",
                 },
+                # M4b: deterministic URL-path-repeat trap detection. Off by default
+                # so the default frontier object graph is identical to pre-M4b and
+                # default crawls stay byte-identical (Invariant I5). When enabled,
+                # get_frontier_backend() wraps the backend in a TrapFilterFrontier.
+                'trap': {
+                    'enabled': False,        # wrap backend with the trap filter
+                    'max_path_repeat': 3,    # consecutive cycle repeats allowed before dropping
+                    'max_period': 4,         # largest cycle length scanned for
+                },
             },
         },
     },

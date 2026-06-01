@@ -189,6 +189,66 @@ def test_engine_wx_depth_in_priority_regression(monkeypatch):
         "http://test/main.html", "http://test/foot.html"}
 
 
+# --- M4b: trap detection end-to-end ---------------------------------------
+
+_TRAP_PAGES = {
+    # root links into a self-deepening period-2 cycle AND a legit deep chain
+    'http://t/': b'<html><body>'
+                 b'<a href="http://t/loop/a/b">loop</a>'
+                 b'<a href="http://t/docs/d1">docs</a>'
+                 b'</body></html>',
+    'http://t/loop/a/b': b'<html><body>'
+                         b'<a href="http://t/loop/a/b/a/b">deeper</a></body></html>',
+    'http://t/loop/a/b/a/b': b'<html><body>'
+                             b'<a href="http://t/loop/a/b/a/b/a/b">deeper</a></body></html>',
+    'http://t/loop/a/b/a/b/a/b': b'<html><body><p>trap leaf</p></body></html>',
+    'http://t/docs/d1': b'<html><body>'
+                        b'<a href="http://t/docs/d1/d2">d2</a></body></html>',
+    'http://t/docs/d1/d2': b'<html><body>'
+                           b'<a href="http://t/docs/d1/d2/d3">d3</a></body></html>',
+    'http://t/docs/d1/d2/d3': b'<html><body><p>docs leaf</p></body></html>',
+}
+
+
+def _run_trap(monkeypatch, frontier, max_depth=3):
+    monkeypatch.setattr(
+        engine, "Crawler",
+        lambda *a, **k: MockCrawler(*a, pages=_TRAP_PAGES, **k),
+    )
+    eng = WXPathEngine(frontier=frontier)
+    expr = "url('http://t/')///url(//a/@href)"
+    results = asyncio.run(_collect_async(eng.run(expr, max_depth=max_depth)))
+    return {e.base_url for e in results}
+
+
+def test_engine_trap_pruned_legit_chain_survives(monkeypatch):
+    """M4b acceptance: the URL-path-repeat trap is pruned at the threshold while a
+    legitimate deep chain of equal length is crawled in full."""
+    from wxpath.http.frontier.memory import InMemoryFrontier
+    from wxpath.http.frontier.trap import TrapFilterFrontier
+
+    frontier = TrapFilterFrontier(
+        InMemoryFrontier(), max_path_repeat=2, max_period=4)
+    crawled = _run_trap(monkeypatch, frontier)
+
+    # period-2 cycle a/b repeated 3× (reps=3 > 2) is dropped at push...
+    assert "http://t/loop/a/b/a/b/a/b" not in crawled
+    assert frontier.dropped == 1
+    # ...but the shallower loop pages (reps ≤ 2) and the full legit chain survive.
+    assert "http://t/loop/a/b/a/b" in crawled
+    assert "http://t/docs/d1/d2/d3" in crawled
+
+
+def test_engine_no_trap_filter_crawls_everything(monkeypatch):
+    """Contrast: without the filter the same trap URL IS fetched — proving the
+    prune above is the filter's doing, not a missing fixture page."""
+    from wxpath.http.frontier.memory import InMemoryFrontier
+
+    crawled = _run_trap(monkeypatch, InMemoryFrontier())
+    assert "http://t/loop/a/b/a/b/a/b" in crawled
+    assert "http://t/docs/d1/d2/d3" in crawled
+
+
 def test_engine_run__crawl(monkeypatch):
     """A single `url()` segment should yield the parsed root element."""
     pages = {

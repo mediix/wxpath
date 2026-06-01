@@ -17,8 +17,8 @@ FRONTIER_SETTINGS = SETTINGS.http.client.frontier
 __all__ = ["Frontier", "get_frontier_backend"]
 
 
-def get_frontier_backend() -> Frontier:
-    """Construct the configured frontier backend.
+def _build_backend() -> Frontier:
+    """Construct the configured frontier backend (pre-wrapping).
 
     Backends are imported lazily so that selecting ``memory`` never imports the
     optional ``sqlite``/``redis`` modules (and their dependencies).
@@ -48,3 +48,24 @@ def get_frontier_backend() -> Frontier:
         )
 
     raise ValueError(f"Unknown frontier backend: {backend}")
+
+
+def get_frontier_backend() -> Frontier:
+    """Construct the configured frontier backend, optionally trap-filtered.
+
+    When ``http.client.frontier.trap.enabled`` (M4b), the backend is wrapped in a
+    :class:`~wxpath.http.frontier.trap.TrapFilterFrontier` that drops URL-path-repeat
+    traps at ``push()``. With it disabled (the default) the bare backend is returned
+    unchanged — the frontier object graph is identical to pre-M4b (Invariant I5).
+    """
+    backend = _build_backend()
+
+    trap = FRONTIER_SETTINGS.trap
+    if trap.enabled:
+        from wxpath.http.frontier.trap import TrapFilterFrontier
+        backend = TrapFilterFrontier(
+            backend,
+            max_path_repeat=trap.max_path_repeat,
+            max_period=trap.max_period,
+        )
+    return backend
