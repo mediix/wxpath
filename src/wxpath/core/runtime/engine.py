@@ -33,7 +33,7 @@ log = get_logger(__name__)
 class HookedEngineBase:
     """Common hook invocation helpers shared by engine variants."""
 
-    async def post_fetch_hooks(self, body: bytes | str, task: CrawlTask) -> bytes | str | None:
+    async def post_fetch_hooks(self, body: bytes | str, ctx: FetchContext) -> bytes | str | None:
         """Run registered `post_fetch` hooks over a fetched response body.
 
         Hooks may be synchronous or asynchronous and can transform or drop the
@@ -41,7 +41,11 @@ class HookedEngineBase:
 
         Args:
             body: Raw response body bytes from the crawler.
-            task: The `CrawlTask` that produced the response.
+            ctx: The per-fetch `FetchContext`. The SAME context instance is
+                threaded through `post_parse_hooks` for this URL, so a hook may
+                stash per-URL state in `ctx.user_data` during `post_fetch` and
+                read it back during `post_parse` (the benchmark latency collector
+                relies on this to pair fetch→parse timing).
 
         Returns:
             The transformed body, or `None` if any hook chooses to drop it.
@@ -49,28 +53,24 @@ class HookedEngineBase:
         for hook in get_hooks():
             hook_method = getattr(hook, "post_fetch", lambda _, b: b)
             if inspect.iscoroutinefunction(hook_method):
-                body = await hook_method(
-                    FetchContext(task.url, task.backlink, task.depth, task.segments), 
-                    body
-                )
+                body = await hook_method(ctx, body)
             else:
-                body = hook_method(
-                    FetchContext(task.url, task.backlink, task.depth, task.segments), 
-                    body
-                )
+                body = hook_method(ctx, body)
             if not body:
-                log.debug(f"hook {type(hook).__name__} dropped {task.url}")
+                log.debug(f"hook {type(hook).__name__} dropped {ctx.url}")
                 break
         return body
-    
+
     async def post_parse_hooks(
-        self, elem: HtmlElement | None, task: CrawlTask
+        self, elem: HtmlElement | None, ctx: FetchContext
     ) -> HtmlElement | None:
         """Run registered `post_parse` hooks on a parsed DOM element.
 
         Args:
             elem: Parsed `lxml` element to process.
-            task: The originating `CrawlTask`.
+            ctx: The per-fetch `FetchContext` — the same instance passed to
+                `post_fetch_hooks` for this URL, so `ctx.user_data` carries any
+                state stashed during the fetch phase.
 
         Returns:
             The transformed element, or `None` if a hook drops the branch.
@@ -78,27 +78,11 @@ class HookedEngineBase:
         for hook in get_hooks():
             hook_method = getattr(hook, "post_parse", lambda _, e: e)
             if inspect.iscoroutinefunction(hook_method):
-                elem = await hook_method(
-                    FetchContext(
-                        url=task.url, 
-                        backlink=task.backlink, 
-                        depth=task.depth, 
-                        segments=task.segments
-                    ),
-                    elem,
-                )
+                elem = await hook_method(ctx, elem)
             else:
-                elem = hook_method(
-                    FetchContext(
-                        url=task.url, 
-                        backlink=task.backlink, 
-                        depth=task.depth, 
-                        segments=task.segments
-                    ),
-                    elem,
-                )
+                elem = hook_method(ctx, elem)
             if elem is None:
-                log.debug(f"hook {type(hook).__name__} dropped {task.url}")
+                log.debug(f"hook {type(hook).__name__} dropped {ctx.url}")
                 break
         return elem
     
@@ -334,7 +318,18 @@ class WXPathEngine(HookedEngineBase):
                             break
                         continue
 
-                    body = await self.post_fetch_hooks(resp.body, task)
+                    # One FetchContext per logical fetch, shared across the
+                    # post_fetch and post_parse hook phases so a hook can carry
+                    # per-URL state in ctx.user_data between them (e.g. the
+                    # benchmark latency collector pairs fetch→parse timing here).
+                    ctx = FetchContext(
+                        url=task.url,
+                        backlink=task.backlink,
+                        depth=task.depth,
+                        segments=task.segments,
+                    )
+
+                    body = await self.post_fetch_hooks(resp.body, ctx)
                     if not body:
                         if await is_terminal():
                             break
@@ -348,7 +343,7 @@ class WXPathEngine(HookedEngineBase):
                         response=resp
                     )
 
-                    elem = await self.post_parse_hooks(elem, task)
+                    elem = await self.post_parse_hooks(elem, ctx)
                     if elem is None:
                         if await is_terminal():
                             break

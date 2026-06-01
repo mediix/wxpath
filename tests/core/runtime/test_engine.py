@@ -1848,3 +1848,62 @@ async def test_yield_errors_default_false(monkeypatch):
     
 #     with pytest.raises(asyncio.TimeoutError):
 #         await asyncio.wait_for(run(), timeout=0.3)
+
+# --------------------------------------------------------------------------- #
+# M0 item 2 — one FetchContext per logical fetch (latency pairing regression)
+# --------------------------------------------------------------------------- #
+# The benchmark latency collector stamps a fetch timestamp into
+# `ctx.user_data` during `post_fetch` and reads it back during `post_parse` to
+# derive per-URL latency. That pairing only works if BOTH hook phases receive
+# the SAME FetchContext instance for a given URL. The engine used to build a
+# fresh FetchContext per phase, so `user_data` was a new empty dict each time
+# and the latency quantiles stayed `<pending>`. This locks the shared-context
+# contract in place.
+def test_engine_shares_fetchcontext_across_fetch_and_parse(monkeypatch):
+    from wxpath.hooks import registry
+
+    pages = {
+        "http://test/": b"""
+            <html><body>
+              <a href="a.html">A</a>
+              <a href="b.html">B</a>
+            </body></html>
+        """,
+        "http://test/a.html": b"<html><body><p>A</p></body></html>",
+        "http://test/b.html": b"<html><body><p>B</p></body></html>",
+    }
+
+    monkeypatch.setattr(
+        engine,
+        "Crawler",
+        lambda *a, **k: MockCrawler(*a, pages=pages, **k),
+    )
+
+    # Records, per URL: whether post_parse saw the value post_fetch stashed in
+    # ctx.user_data, and whether it was the same dict object (identity).
+    paired: dict[str, bool] = {}
+    same_object: dict[str, bool] = {}
+
+    class _PairingHook:
+        def post_fetch(self, ctx, html_bytes):
+            ctx.user_data["_fetch_marker"] = id(ctx.user_data)
+            return html_bytes
+
+        def post_parse(self, ctx, elem):
+            marker = ctx.user_data.get("_fetch_marker")
+            paired[ctx.url] = marker is not None
+            same_object[ctx.url] = marker == id(ctx.user_data)
+            return elem
+
+    registry._global_hooks.clear()
+    try:
+        registry.register(_PairingHook())
+        expr = "url('http://test/')//url(//@href)"
+        asyncio.run(_collect_async(engine.WXPathEngine().run(expr, max_depth=1)))
+    finally:
+        registry._global_hooks.clear()
+
+    # Every fetched URL ran both phases against one shared context.
+    assert paired, "post_parse hook never fired"
+    assert all(paired.values()), f"fetch->parse pairing lost for: {paired}"
+    assert all(same_object.values()), f"user_data dict not shared for: {same_object}"
