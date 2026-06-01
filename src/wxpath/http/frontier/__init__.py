@@ -51,12 +51,22 @@ def _build_backend() -> Frontier:
 
 
 def get_frontier_backend() -> Frontier:
-    """Construct the configured frontier backend, optionally trap-filtered.
+    """Construct the configured frontier backend, optionally wrapped.
 
-    When ``http.client.frontier.trap.enabled`` (M4b), the backend is wrapped in a
-    :class:`~wxpath.http.frontier.trap.TrapFilterFrontier` that drops URL-path-repeat
-    traps at ``push()``. With it disabled (the default) the bare backend is returned
-    unchanged — the frontier object graph is identical to pre-M4b (Invariant I5).
+    Two composable wrappers may be layered on, each gated by its own settings flag
+    and absent (the default) so the object graph stays identical to the bare backend
+    (Invariant I5):
+
+    * **M4b** ``http.client.frontier.trap.enabled`` →
+      :class:`~wxpath.http.frontier.trap.TrapFilterFrontier` drops URL-path-repeat
+      traps at ``push()``.
+    * **M6** ``http.client.frontier.canonical.enabled`` →
+      :class:`~wxpath.http.frontier.canonical.CanonicalizingFrontier` normalizes each
+      URL before dedup/admission.
+
+    The canonicalizer is the **outermost** wrapper so URLs are normalized *before*
+    the trap filter and the backend's dedup ever see them (trap detection and dedup
+    both operate on the canonical form).
     """
     backend = _build_backend()
 
@@ -67,5 +77,15 @@ def get_frontier_backend() -> Frontier:
             backend,
             max_path_repeat=trap.max_path_repeat,
             max_period=trap.max_period,
+        )
+
+    canonical = FRONTIER_SETTINGS.canonical
+    if canonical.enabled:
+        from wxpath.http.frontier.canonical import CanonicalizingFrontier
+        backend = CanonicalizingFrontier(
+            backend,
+            strip_params=canonical.strip_params,
+            drop_fragment=canonical.drop_fragment,
+            normalize_trailing_slash=canonical.normalize_trailing_slash,
         )
     return backend

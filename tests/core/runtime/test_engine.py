@@ -1848,3 +1848,174 @@ async def test_yield_errors_default_false(monkeypatch):
     
 #     with pytest.raises(asyncio.TimeoutError):
 #         await asyncio.wait_for(run(), timeout=0.3)
+
+# --------------------------------------------------------------------------- #
+# M0 item 2 — one FetchContext per logical fetch (latency pairing regression)
+# --------------------------------------------------------------------------- #
+# The benchmark latency collector stamps a fetch timestamp into
+# `ctx.user_data` during `post_fetch` and reads it back during `post_parse` to
+# derive per-URL latency. That pairing only works if BOTH hook phases receive
+# the SAME FetchContext instance for a given URL. The engine used to build a
+# fresh FetchContext per phase, so `user_data` was a new empty dict each time
+# and the latency quantiles stayed `<pending>`. This locks the shared-context
+# contract in place.
+def test_engine_shares_fetchcontext_across_fetch_and_parse(monkeypatch):
+    from wxpath.hooks import registry
+
+    pages = {
+        "http://test/": b"""
+            <html><body>
+              <a href="a.html">A</a>
+              <a href="b.html">B</a>
+            </body></html>
+        """,
+        "http://test/a.html": b"<html><body><p>A</p></body></html>",
+        "http://test/b.html": b"<html><body><p>B</p></body></html>",
+    }
+
+    monkeypatch.setattr(
+        engine,
+        "Crawler",
+        lambda *a, **k: MockCrawler(*a, pages=pages, **k),
+    )
+
+    # Records, per URL: whether post_parse saw the value post_fetch stashed in
+    # ctx.user_data, and whether it was the same dict object (identity).
+    paired: dict[str, bool] = {}
+    same_object: dict[str, bool] = {}
+
+    class _PairingHook:
+        def post_fetch(self, ctx, html_bytes):
+            ctx.user_data["_fetch_marker"] = id(ctx.user_data)
+            return html_bytes
+
+        def post_parse(self, ctx, elem):
+            marker = ctx.user_data.get("_fetch_marker")
+            paired[ctx.url] = marker is not None
+            same_object[ctx.url] = marker == id(ctx.user_data)
+            return elem
+
+    registry._global_hooks.clear()
+    try:
+        registry.register(_PairingHook())
+        expr = "url('http://test/')//url(//@href)"
+        asyncio.run(_collect_async(engine.WXPathEngine().run(expr, max_depth=1)))
+    finally:
+        registry._global_hooks.clear()
+
+    # Every fetched URL ran both phases against one shared context.
+    assert paired, "post_parse hook never fired"
+    assert all(paired.values()), f"fetch->parse pairing lost for: {paired}"
+    assert all(same_object.values()), f"user_data dict not shared for: {same_object}"
+
+
+# --------------------------------------------------------------------------- #
+# M6 — URL canonicalization dedup (end-to-end acceptance)
+# --------------------------------------------------------------------------- #
+# A page links to /p/1, /p/1?utm_source=x, /p/1#section and /p/1/ — four raw URLs
+# that are the SAME page. With canonicalization enabled the frontier dedups them
+# to one canonical URL → exactly one fetch (FRONTIER_ROADMAP M6 acceptance). With
+# it off, each variant is fetched separately (the bug M6 fixes).
+class _CountingCrawler(MockCrawler):
+    """MockCrawler that records every submitted URL."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.fetched: list[str] = []
+
+    def submit(self, request):
+        self.fetched.append(request.url)
+        super().submit(request)
+
+
+_CANON_VARIANTS = {
+    "http://test/": (
+        b"<html><body>"
+        b"<a href='/p/1'>a</a>"
+        b"<a href='/p/1?utm_source=x'>b</a>"
+        b"<a href='/p/1#section'>c</a>"
+        b"<a href='/p/1/'>d</a>"
+        b"</body></html>"
+    ),
+    # Every raw variant has its own body so the control (canon OFF) fetches each.
+    "http://test/p/1": b"<html><body><p>one</p></body></html>",
+    "http://test/p/1?utm_source=x": b"<html><body><p>one</p></body></html>",
+    "http://test/p/1#section": b"<html><body><p>one</p></body></html>",
+    "http://test/p/1/": b"<html><body><p>one</p></body></html>",
+}
+
+
+def _run_canon(monkeypatch, *, enabled: bool):
+    crawler = _CountingCrawler(pages=_CANON_VARIANTS)
+    monkeypatch.setattr(engine, "Crawler", lambda *a, **k: crawler)
+    from wxpath.http import frontier as frontier_pkg
+    monkeypatch.setattr(frontier_pkg.FRONTIER_SETTINGS.canonical, "enabled", enabled)
+
+    eng = engine.WXPathEngine(crawler=crawler)
+    results = asyncio.run(
+        _collect_async(eng.run("url('http://test/')//url(//a/@href)", max_depth=1))
+    )
+    child_fetches = [u for u in crawler.fetched if "/p/1" in u]
+    return results, child_fetches
+
+
+def test_engine_canonical_dedups_url_variants(monkeypatch):
+    results, child_fetches = _run_canon(monkeypatch, enabled=True)
+    # All four variants collapse to one canonical fetch.
+    assert child_fetches == ["http://test/p/1"], child_fetches
+    assert len(results) == 1
+
+
+def test_engine_without_canonical_fetches_each_variant(monkeypatch):
+    # Control: with canonicalization off, every raw variant is a distinct fetch —
+    # demonstrating the wasted-fetch problem M6 eliminates.
+    _results, child_fetches = _run_canon(monkeypatch, enabled=False)
+    assert len(child_fetches) == 4
+    assert len(set(child_fetches)) == 4
+
+
+# --------------------------------------------------------------------------- #
+# M6 layer 2 — content-fingerprint near-dup dedup (end-to-end)
+# --------------------------------------------------------------------------- #
+# /a and /b are distinct URLs serving IDENTICAL article bodies. Both are fetched
+# (dedup is post-parse), but with fingerprinting on only the FIRST is recorded —
+# the near-duplicate is skipped (FRONTIER_ROADMAP M6 layer 2). With it off, both
+# are recorded.
+_DUP_ARTICLE = (
+    b"<article><p>"
+    b"The migratory patterns of arctic terns span pole to pole each year, "
+    b"the longest known migration of any animal, a remarkable feat of endurance "
+    b"and navigation repeated across the bird's three-decade lifespan."
+    b"</p></article>"
+)
+_FINGERPRINT_PAGES = {
+    "http://test/": (
+        b"<html><body><a href='/a'>A</a><a href='/b'>B</a></body></html>"
+    ),
+    "http://test/a": b"<html><body>" + _DUP_ARTICLE + b"</body></html>",
+    "http://test/b": b"<html><body>" + _DUP_ARTICLE + b"</body></html>",  # identical content
+}
+
+
+def _run_fingerprint(monkeypatch, *, enabled: bool):
+    monkeypatch.setattr(
+        engine, "Crawler", lambda *a, **k: MockCrawler(pages=_FINGERPRINT_PAGES)
+    )
+    from wxpath.http import frontier as frontier_pkg
+    monkeypatch.setattr(frontier_pkg.FRONTIER_SETTINGS.fingerprint, "enabled", enabled)
+    eng = engine.WXPathEngine()
+    return asyncio.run(
+        _collect_async(eng.run("url('http://test/')//url(//a/@href)", max_depth=1))
+    )
+
+
+def test_engine_fingerprint_dedups_identical_content(monkeypatch):
+    results = _run_fingerprint(monkeypatch, enabled=True)
+    # /a recorded, /b is a content near-duplicate → skipped.
+    assert len(results) == 1
+
+
+def test_engine_without_fingerprint_records_both(monkeypatch):
+    # Control: fingerprinting off ⇒ both identical-content pages are recorded.
+    results = _run_fingerprint(monkeypatch, enabled=False)
+    assert len(results) == 2

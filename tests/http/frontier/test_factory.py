@@ -43,3 +43,34 @@ def test_trap_enabled_wraps_configured_backend(monkeypatch):
     assert isinstance(backend, TrapFilterFrontier)
     assert isinstance(backend._inner, InMemoryFrontier)   # wraps the configured backend
     assert backend._max_path_repeat == 2
+
+
+def test_canonical_disabled_returns_bare_backend():
+    # Default (canonical.enabled is False) ⇒ no wrapper, identical object graph (I5/I11).
+    from wxpath.http.frontier.canonical import CanonicalizingFrontier
+    backend = get_frontier_backend()
+    assert isinstance(backend, InMemoryFrontier)
+    assert not isinstance(backend, CanonicalizingFrontier)
+
+
+def test_canonical_enabled_wraps_configured_backend(monkeypatch):
+    from wxpath.http.frontier.canonical import CanonicalizingFrontier
+    monkeypatch.setattr(frontier_pkg.FRONTIER_SETTINGS.canonical, "enabled", True)
+    monkeypatch.setattr(frontier_pkg.FRONTIER_SETTINGS.canonical, "strip_params", ["utm_*"])
+    backend = get_frontier_backend()
+    assert isinstance(backend, CanonicalizingFrontier)
+    assert isinstance(backend._inner, InMemoryFrontier)
+    assert backend._strip_params == ("utm_*",)
+
+
+def test_canonical_is_outermost_over_trap(monkeypatch):
+    # With both enabled, the canonicalizer wraps the trap filter (URLs are
+    # normalized before trap detection / dedup ever see them).
+    from wxpath.http.frontier.canonical import CanonicalizingFrontier
+    from wxpath.http.frontier.trap import TrapFilterFrontier
+    monkeypatch.setattr(frontier_pkg.FRONTIER_SETTINGS.trap, "enabled", True)
+    monkeypatch.setattr(frontier_pkg.FRONTIER_SETTINGS.canonical, "enabled", True)
+    backend = get_frontier_backend()
+    assert isinstance(backend, CanonicalizingFrontier)
+    assert isinstance(backend._inner, TrapFilterFrontier)
+    assert isinstance(backend._inner._inner, InMemoryFrontier)
