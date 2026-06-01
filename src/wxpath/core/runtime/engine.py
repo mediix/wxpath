@@ -24,6 +24,7 @@ from wxpath.hooks.registry import FetchContext, get_hooks
 from wxpath.http.client.crawler import Crawler
 from wxpath.http.client.request import Request
 from wxpath.http.frontier import Frontier, get_frontier_backend
+from wxpath.http.frontier.scoring import FrontierScorer, get_frontier_scorer
 from wxpath.util.logging import get_logger
 
 log = get_logger(__name__)
@@ -218,6 +219,7 @@ class WXPathEngine(HookedEngineBase):
         max_depth = self._get_max_depth(bin_or_segs, max_depth)
 
         frontier = self._injected_frontier or get_frontier_backend()
+        scorer = get_frontier_scorer()
         inflight: dict[str, CrawlTask] = {}
         pending_tasks = 0
 
@@ -268,6 +270,7 @@ class WXPathEngine(HookedEngineBase):
                     depth=seed_task.depth,
                     max_depth=max_depth,
                     frontier=frontier,
+                    scorer=scorer,
                     pbar=pbar,
                 ):
                     yield await self.post_extract_hooks(output)
@@ -358,8 +361,9 @@ class WXPathEngine(HookedEngineBase):
                             depth=task.depth,
                             max_depth=max_depth,
                             frontier=frontier,
+                            scorer=scorer,
                             pbar=pbar
-                        ):  
+                        ):
                             total_yielded += 1
                             if pbar is not None:
                                 pbar.set_postfix(yielded=total_yielded, depth=task.depth,)
@@ -397,10 +401,11 @@ class WXPathEngine(HookedEngineBase):
     async def _process_pipeline(
         self,
         task: CrawlTask,
-        elem: Any, 
+        elem: Any,
         depth: int,
         max_depth: int,
         frontier: Frontier,
+        scorer: FrontierScorer,
         pbar: tqdm = None
     ) -> AsyncGenerator[Any, None]:
         """Process a queue of intents for a single crawl branch.
@@ -443,11 +448,14 @@ class WXPathEngine(HookedEngineBase):
                         # multiple pages is queued at most once (first discovery wins).
                         log.debug(f"Depth: {next_depth}; Enqueuing {intent.url}")
 
-                        # M3: the DSL `priority=` is "higher = sooner", but the
-                        # frontier is min-first (lower = sooner), so negate. An
-                        # unscored link (score is None) leaves priority unset, so
-                        # CrawlTask defaults it to depth → BFS preserved (I5).
-                        priority = -intent.score if intent.score is not None else None
+                        # M5: the active scorer maps the discovered intent to a score
+                        # (higher = sooner). The default DeterministicScorer returns
+                        # intent.score, so this is identical to M3/M4. The frontier is
+                        # min-first (lower = sooner), so negate. An unscored link
+                        # (score is None) leaves priority unset, so CrawlTask defaults
+                        # it to depth → BFS preserved (Invariant I5).
+                        score = scorer.score(intent)
+                        priority = -score if score is not None else None
                         pushed = await frontier.push(
                             CrawlTask(
                                 elem=None,

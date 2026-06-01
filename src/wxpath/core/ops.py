@@ -31,6 +31,7 @@ from wxpath.core.parser import (
     UrlCrawl,
     Xpath,
 )
+from wxpath.http.frontier.scoring import needs_anchor_text
 from wxpath.patches import WXPathParser
 from wxpath.util.logging import get_logger
 
@@ -127,14 +128,35 @@ def _resolve_score(score_node: Score | None, anchor) -> float | None:
     return _eval_score(anchor, score_node.expr)
 
 
-def _discover_scored(curr_elem, path_exp: str, score_node: Score | None):
-    """Yield ``(url, score)`` for each discovered link, deduped (first wins).
+def _anchor_text(anchor) -> str | None:
+    """Normalized visible text of a link's anchor element (None if unavailable).
 
-    Constant (or absent) scores take the existing ``xpath3`` discovery path —
-    identical URL set to the unscored crawl. Only a *dynamic* score pays for
-    anchor resolution.
+    Uses ``itertext()`` (works for both ``HtmlElement`` and elementpath's
+    ``XPath3Element``) and collapses whitespace. Captured at discovery for the M5
+    semantic scorer; the deterministic scorer ignores it.
     """
-    if score_node is not None and score_node.const is None:
+    if anchor is None or isinstance(anchor, str):
+        return None
+    try:
+        text = "".join(anchor.itertext())
+    except Exception:
+        return None
+    text = " ".join(text.split())
+    return text or None
+
+
+def _discover_scored(curr_elem, path_exp: str, score_node: Score | None):
+    """Yield ``(url, score, anchor_text)`` for each discovered link, deduped (first wins).
+
+    Anchors are resolved — yielding ``anchor_text`` and the node a dynamic score
+    needs — when a *dynamic* ``priority=`` is present **or** a text-based scorer is
+    active (:func:`needs_anchor_text`, i.e. ``scorer: semantic``). Otherwise the
+    existing ``xpath3`` discovery path runs unchanged, with ``anchor_text`` ``None``:
+    identical URL set/order to the unscored crawl, so the deterministic default stays
+    byte-identical (Invariant I5).
+    """
+    dynamic = score_node is not None and score_node.const is None
+    if dynamic or needs_anchor_text():
         pairs = get_links_with_anchors_from_elem_and_xpath(curr_elem, path_exp)
     else:
         pairs = ((u, None) for u in get_absolute_links_from_elem_and_xpath(curr_elem, path_exp))
@@ -144,7 +166,7 @@ def _discover_scored(curr_elem, path_exp: str, score_node: Score | None):
         if url in seen:
             continue
         seen.add(url)
-        yield url, _resolve_score(score_node, anchor)
+        yield url, _resolve_score(score_node, anchor), _anchor_text(anchor)
 
 
 @register('url', (String,))
@@ -243,15 +265,17 @@ def _handle_url_eval(curr_elem: html.HtmlElement | str,
         yield CrawlIntent(
             url=url, next_segments=next_segments,
             score=_resolve_score(score_node, anchor),
+            anchor_text=_anchor_text(anchor),
         )
         return
 
     _path_exp = url_call.args[0].value
     # TODO: If prior xpath operation is XPATH_FN_MAP_FRAG, then this will likely fail.
     # It should be handled in the parser.
-    for url, score in _discover_scored(curr_elem, _path_exp, score_node):
+    for url, score, anchor_text in _discover_scored(curr_elem, _path_exp, score_node):
         # log.debug("queueing", extra={"depth": curr_depth, "op": op, "url": url})
-        yield CrawlIntent(url=url, next_segments=next_segments, score=score)
+        yield CrawlIntent(url=url, next_segments=next_segments, score=score,
+                          anchor_text=anchor_text)
 
 
 @register('///url', (Xpath,))
@@ -278,13 +302,14 @@ def _handle_url_inf(curr_elem: html.HtmlElement,
     _path_exp = xpath_arg.value
 
     tail_segments = curr_segments[1:]
-    for url, score in _discover_scored(curr_elem, _path_exp, score_node):
+    for url, score, anchor_text in _discover_scored(curr_elem, _path_exp, score_node):
         # Carry the Score forward (before the url) so the next ///url level —
         # reached via _handle_url_inf_and_xpath(args[:-1]) — re-scores.
         inner_args = [xpath_arg, score_node, url] if score_node is not None else [xpath_arg, url]
         _segments = [UrlCrawl('///url', inner_args)] + tail_segments
 
-        yield CrawlIntent(url=url, next_segments=_segments, score=score)
+        yield CrawlIntent(url=url, next_segments=_segments, score=score,
+                          anchor_text=anchor_text)
 
 
 @register('///url', (Xpath, str))

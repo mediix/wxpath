@@ -189,6 +189,84 @@ def test_engine_wx_depth_in_priority_regression(monkeypatch):
         "http://test/main.html", "http://test/foot.html"}
 
 
+# --- M5: semantic frontier scoring end-to-end -----------------------------
+
+# Root links, in document order: an OFF-topic link first, an ON-topic link second.
+# Pure BFS fetches them in document order (off, on). A semantic scorer keyed to the
+# objective reorders the frontier so the on-topic page is fetched first — while the
+# extracted data stays identical (Invariant I4/I10).
+_SEMANTIC_PAGES = {
+    'http://test/': b"""<html><body>
+        <a href="off.html">celebrity gossip news</a>
+        <a href="on.html">lithium battery recycling guide</a>
+    </body></html>""",
+    'http://test/on.html':  b"<html><body><p>on</p></body></html>",
+    'http://test/off.html': b"<html><body><p>off</p></body></html>",
+}
+
+_SEMANTIC_VOCAB = ["lithium", "battery", "recycling", "guide",
+                   "celebrity", "gossip", "news"]
+
+
+class _BagOfWordsEmbedder:
+    """Deterministic 0/1 bag-of-words embedder over a fixed vocab (no ML dep)."""
+
+    def __init__(self, vocab):
+        self._vocab = list(vocab)
+
+    def embed(self, texts):
+        return [[1.0 if v in set(t.lower().split()) else 0.0 for v in self._vocab]
+                for t in texts]
+
+
+def _run_semantic(monkeypatch, expr, objective, max_depth=1):
+    from wxpath.settings import SETTINGS
+    frontier = SETTINGS.http.client.frontier
+    monkeypatch.setitem(frontier, "scorer", "semantic")
+    monkeypatch.setitem(frontier, "objective", objective)
+    monkeypatch.setattr(
+        "wxpath.http.frontier.embedders.get_embedder",
+        lambda cfg: _BagOfWordsEmbedder(_SEMANTIC_VOCAB),
+    )
+    monkeypatch.setattr(
+        engine, "Crawler",
+        lambda *a, **k: MockCrawler(*a, pages=_SEMANTIC_PAGES, **k),
+    )
+    return asyncio.run(_collect_async(engine.WXPathEngine().run(expr, max_depth=max_depth)))
+
+
+def test_engine_semantic_orders_on_topic_first(monkeypatch):
+    """scorer=semantic: the on-topic link is fetched before the off-topic one,
+    though it appears second in document order (BFS would fetch off first)."""
+    expr = "url('http://test/')//url(//a/@href)"
+    results = _run_semantic(monkeypatch, expr, objective="lithium battery recycling")
+    assert [e.base_url for e in results] == [
+        "http://test/on.html",    # on-topic anchor ⇒ higher cosine ⇒ popped first
+        "http://test/off.html",   # off-topic anchor ⇒ cosine 0 ⇒ popped last
+    ]
+
+
+def test_engine_semantic_changes_order_not_data(monkeypatch):
+    """Invariant I4/I10: the semantic scorer changes ORDER, never extracted DATA.
+
+    The same map{} records are produced as a plain BFS crawl; only order differs.
+    """
+    tail = "/map { 'p': string((//p/text())[1]) }"
+    expr = "url('http://test/')//url(//a/@href)" + tail
+    semantic = _run_semantic(monkeypatch, expr, objective="lithium battery recycling")
+
+    # Re-run the same pages with the default deterministic scorer → BFS order.
+    from wxpath.settings import SETTINGS
+    monkeypatch.setitem(SETTINGS.http.client.frontier, "scorer", "deterministic")
+    bfs = asyncio.run(_collect_async(engine.WXPathEngine().run(expr, max_depth=1)))
+
+    semantic = [dict(r.items()) for r in semantic]
+    bfs = [dict(r.items()) for r in bfs]
+    assert semantic != bfs                                        # order differs...
+    assert sorted(map(repr, semantic)) == sorted(map(repr, bfs))  # ...data identical
+    assert semantic[0] == {"p": "on"}                             # on-topic extracted first
+
+
 # --- M4b: trap detection end-to-end ---------------------------------------
 
 _TRAP_PAGES = {

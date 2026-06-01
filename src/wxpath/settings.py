@@ -86,6 +86,17 @@ SETTINGS = {
                     'max_path_repeat': 3,    # consecutive cycle repeats allowed before dropping
                     'max_period': 4,         # largest cycle length scanned for
                 },
+                # M5: pluggable frontier scoring. 'deterministic' (default) passes
+                # through the M3/M4 priority= score → engine enqueue path is identical
+                # to pre-M5 (Invariant I5/I10). 'semantic' orders links by relevance of
+                # anchor_text+url to `objective` using an injected embedder (the
+                # wxpath[semantic] extra) — traversal ORDER only, never extracted DATA.
+                'scorer': "deterministic",   # deterministic | semantic
+                'objective': "",             # semantic target objective (semantic only)
+                'semantic': {
+                    'model': "all-MiniLM-L6-v2",  # reference embedder model id
+                    'cache': True,                # cache scores by anchor text
+                },
             },
         },
     },

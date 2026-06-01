@@ -52,6 +52,10 @@ class CrawlIntent(Intent):
     # None means "unscored" → the engine falls back to depth (BFS, Invariant I5).
     # The engine negates this into CrawlTask.priority (lower = popped sooner).
     score: float | None = None
+    # M5: visible anchor text of the discovered link, captured at discovery for the
+    # semantic scorer. Ephemeral — read at the engine chokepoint, never carried onto
+    # CrawlTask or persisted. None when no anchor was resolved (the default path).
+    anchor_text: str | None = None
     # provenance: "Provenance | None" = None   # ← M4
 
 

@@ -45,6 +45,9 @@ docs = ["mkdocs>=1.5", "mkdocs-material>=9.0", "mkdocstrings[python]>=0.24", "mk
 tui = ["textual>=1.0.0", "aiohttp-client-cache>=0.14.0", "aiohttp-client-cache[sqlite]"]
 bench = ["pyyaml>=6.0", "datasketch>=1.6", "numpy>=1.24"]
 frontier-redis = ["redis>=5.0"]
+# M5: opt-in semantic frontier scorer (reference embedder). Core stays ML-free;
+# this extra is imported only when http.client.frontier.scorer == "semantic".
+semantic = ["sentence-transformers>=2.2", "numpy>=1.24"]
 
 [project.scripts]
 wxpath = "wxpath.cli:main"

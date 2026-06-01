@@ -186,16 +186,35 @@ class CrawlIntent(Intent):
 only between discovery (ops) and scoring (engine chokepoint). Default `None` leaves
 every existing path unchanged; a missing anchor yields `None` → BFS fallback.
 
-Capture in ops where the `CrawlIntent`s are built (the `ContextItem` branch
-~ops.py:243 and the two `_discover_scored` loops ~ops.py:254/287):
+**Resolving the unscored-path gap (implementation decision).** A semantic crawl
+normally uses an *unscored* `url(//a/@href)` (no `priority=`), and today the unscored
+discovery path (`get_absolute_links_from_elem_and_xpath`) resolves **no anchors** — so
+`anchor_text` would always be `None` and the semantic scorer would no-op. The fix is to
+gate anchor resolution on **"a dynamic score is present OR a text-based scorer is
+active"**, the latter read live via `scoring.needs_anchor_text()` (`scorer ==
+"semantic"`). `_discover_scored` then yields `(url, score, anchor_text)`:
 
 ```python
-text = anchor.text_content() if anchor is not None and not isinstance(anchor, str) else None
-yield CrawlIntent(url=url, next_segments=..., score=score, anchor_text=text)
+dynamic = score_node is not None and score_node.const is None
+if dynamic or needs_anchor_text():
+    pairs = get_links_with_anchors_from_elem_and_xpath(curr_elem, path_exp)  # anchors
+else:
+    pairs = ((u, None) for u in get_absolute_links_from_elem_and_xpath(curr_elem, path_exp))
+...
+yield url, _resolve_score(score_node, anchor), _anchor_text(anchor)
 ```
 
-`text_content()` is the lxml `HtmlElement` method already used elsewhere in the DOM
-layer; it is a pure read of served HTML (no network/clock → I6 family).
+This keeps the deterministic default's discovery path **byte-identical** (I5):
+`needs_anchor_text()` is `False`, so the unscored path is untouched. The
+anchor-resolving discovery only engages under `scorer: semantic`, where byte-repro
+across runs is not promised anyway — and `dom.py` documents that the anchor path
+yields the **same URL set** as `xpath3`, so coverage is unaffected. Consumers (the
+`ContextItem` branch + the two `_discover_scored` loops in
+[ops.py](../src/wxpath/core/ops.py)) pass `anchor_text` into `CrawlIntent`.
+
+`_anchor_text(anchor)` uses `itertext()` (works for both `HtmlElement` and
+elementpath's `XPath3Element` — the M4a lesson) and collapses whitespace; it is a pure
+read of served HTML (no network/clock → I6 family).
 
 ---
 
@@ -332,13 +351,18 @@ I10 (semantic order, M5): A semantic FrontierScorer affects traversal ORDER only
 
 ---
 
-## 9. Build order
+## 9. Build order — IMPLEMENTED
 
-1. `scoring.py`: `FrontierScorer` + `DeterministicScorer` + `_cosine` + factory;
-   settings block; engine `scorer` construct + chokepoint edit. Full suite +
+1. ✅ `scoring.py`: `FrontierScorer` + `DeterministicScorer` + `_cosine` + factory;
+   settings block; engine `scorer` construct + chokepoint edit. Suite green +
    `local_fixture` I5 byte-identical (deterministic default, no ML touched).
-2. `CrawlIntent.anchor_text` + ops capture (additive, default `None`); anchor-text test.
-3. `SemanticScorer` + `Embedder` protocol + stub-embedder unit tests + engine e2e
-   order-vs-data (I4) test.
-4. `embedders.py` reference impl + `[semantic]` extra; append I10 to DESIGN.md; offer
-   to commit.
+2. ✅ `CrawlIntent.anchor_text` + ops capture via `needs_anchor_text()` gating
+   (additive, default `None`; I5 path unchanged).
+3. ✅ `SemanticScorer` + `Embedder` protocol + stub-embedder unit tests (10) + engine
+   e2e order-vs-data / I4-I10 test (2).
+4. ✅ `embedders.py` reference impl + `[semantic]` extra; I10 appended to
+   FRONTIER_ROADMAP.md invariant block (where I8/I9 live, per M4b precedent).
+
+**Result:** suite **312 passed** (was 300; +12). `wxpath-bench run local_fixture`
+byte-identical to the M4b baseline (`d0:1 d1:4 d2:16 d3:64 d4:256 d5:171`, 511
+extractions, content 510). I10 holds.

@@ -761,6 +761,14 @@ I9 (trap admission, M4b): URL-path-repeat trap detection is a pure function of t
     URL string and is applied as a composable frontier wrapper that is absent unless
     http.client.frontier.trap.enabled. With it disabled the frontier object graph is
     identical to pre-M4b, so default crawls remain byte-reproducible (extends I5).
+
+I10 (semantic order, M5): A semantic FrontierScorer affects traversal ORDER only,
+    never extracted DATA (a concrete realization of I4). With scorer=deterministic
+    (the default) the scorer is a pure passthrough of the M3/M4 score, so the engine
+    enqueue path — and the unscored discovery path — is byte-identical to pre-M5
+    (extends I5). A semantic crawl is reproducible given a pinned embedder, but
+    coverage-under-budget is not guaranteed across embedder versions; the
+    reproducibility gate runs scorer=deterministic.
 ```
 
 ## What we deliberately will not do
