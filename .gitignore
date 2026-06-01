@@ -56,3 +56,6 @@ assets/images-large
 # benchmark run outputs (keep the dir via .gitkeep)
 benchmarks/results/*
 !benchmarks/results/.gitkeep
+
+# local scratch notebook (not part of the project)
+playground.ipynb
