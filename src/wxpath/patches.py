@@ -126,10 +126,30 @@ class XPathContextRequired(Exception):
 def _get_root(context: XPathContext):
     if context is None:
         raise XPathContextRequired
-    
+
     if not hasattr(context.item, 'elem'):
         return context.item.parent.elem.getroottree().getroot()
     return context.item.elem.getroottree().getroot()
+
+
+def _ctx_elem(context: XPathContext):
+    """Resolve the context item to its lxml element.
+
+    When a `wx:` function is called with a leading axis relative to the context
+    item — e.g. ``./wx:parent-tag()`` evaluated against a discovered link's anchor
+    — ``context.item`` is the anchor node and ``context.item.elem`` is the lxml
+    element. If the item is an attribute node it carries no ``elem``; fall back to
+    its owning element (mirrors :func:`_get_root`).
+    """
+    if context is None:
+        raise XPathContextRequired
+    item = context.item
+    if hasattr(item, 'elem'):
+        return item.elem
+    parent = getattr(item, 'parent', None)
+    if parent is not None and hasattr(parent, 'elem'):
+        return parent.elem
+    raise XPathContextRequired
 
 
 @register_wxpath_function('wx:depth', nargs=0)
@@ -271,3 +291,79 @@ def wx_main_article_text(_: XPathFunction, context: XPathContext):
     except Exception:
         log.exception('Failed to extract main article text')
         return ''
+
+
+# --- M4a: link-provenance functions (on-demand, no storage) ---------------
+#
+# These read the *anchor* element of a discovered link (the context item when a
+# priority expression calls `./wx:fn()`) and compute a provenance signal purely
+# from the live parent DOM. No clock / RNG / network → bit-reproducible (I6).
+
+# Sectioning containers used to summarise where a link sits structurally.
+_SECTION_TAGS = frozenset(
+    {'main', 'article', 'nav', 'aside', 'header', 'footer', 'section'}
+)
+
+
+def _elem_text(el) -> str:
+    """Visible text of an element, robust to XPath3Element (etree.ElementBase).
+
+    ``text_content()`` is an lxml.html.HtmlElement method; our parsed elements
+    are :class:`XPath3Element` (``etree.ElementBase``) which lacks it, so gather
+    descendant text via ``itertext()`` instead.
+    """
+    if el is None:
+        return ''
+    return ''.join(el.itertext()).strip()
+
+
+def _containing_block(el):
+    """Nearest sectioning/`div` ancestor of ``el`` (or ``el`` itself).
+
+    The "block" is the unit we measure link density over — a footer/nav/aside or
+    a content ``div`` — so a single dense link list demotes all its links.
+    """
+    for anc in el.iterancestors():
+        if anc.tag in _SECTION_TAGS or anc.tag == 'div':
+            return anc
+    return el
+
+
+@register_wxpath_function('wx:anchor-text', nargs=0)
+def wx_anchor_text(_: XPathFunction, context: XPathContext) -> str:
+    """Visible text of the anchor element (trimmed)."""
+    el = _ctx_elem(context)
+    return _elem_text(el)
+
+
+@register_wxpath_function('wx:parent-tag', nargs=0)
+def wx_parent_tag(_: XPathFunction, context: XPathContext) -> str:
+    """Nearest sectioning ancestor tag, else the immediate parent tag."""
+    el = _ctx_elem(context)
+    for anc in el.iterancestors():
+        if anc.tag in _SECTION_TAGS:
+            return anc.tag
+    parent = el.getparent()
+    return parent.tag if parent is not None else ''
+
+
+@register_wxpath_function('wx:link-density', nargs=0)
+def wx_link_density(_: XPathFunction, context: XPathContext) -> float:
+    """Links-per-character of the anchor's containing block.
+
+    High density ⇒ boilerplate (nav/footer/link-farm); low ⇒ prose. Returns the
+    raw link count when the block has no text (degenerate pure-link block).
+    """
+    el = _ctx_elem(context)
+    block = _containing_block(el)
+    n_links = len(block.xpath('.//a'))
+    text_len = len(_elem_text(block))
+    return n_links / text_len if text_len else float(n_links)
+
+
+@register_wxpath_function('wx:ancestor-path', nargs=0)
+def wx_ancestor_path(_: XPathFunction, context: XPathContext) -> str:
+    """Tag path from document root to the anchor, e.g. ``html/body/main/div/a``."""
+    el = _ctx_elem(context)
+    tags = [a.tag for a in reversed(list(el.iterancestors()))] + [el.tag]
+    return '/'.join(tags)

@@ -143,6 +143,52 @@ def test_engine_priority_changes_order_not_data(monkeypatch):
     assert scored[0] == {"p": "high"}          # high-rank page extracted first
 
 
+# --- M4a: provenance scoring end-to-end -----------------------------------
+
+_PROVENANCE_PAGES = {
+    'http://test/': b"""<html><body>
+        <footer><a href="foot.html">footer link</a></footer>
+        <main><a href="main.html">main link</a></main>
+    </body></html>""",
+    'http://test/main.html': b"<html><body><p>main</p></body></html>",
+    'http://test/foot.html': b"<html><body><p>foot</p></body></html>",
+}
+
+
+def _run_provenance(monkeypatch, expr, pages=_PROVENANCE_PAGES, max_depth=1):
+    monkeypatch.setattr(
+        engine, "Crawler",
+        lambda *a, **k: MockCrawler(*a, pages=pages, **k),
+    )
+    return asyncio.run(_collect_async(engine.WXPathEngine().run(expr, max_depth=max_depth)))
+
+
+def test_engine_provenance_main_before_footer(monkeypatch):
+    """M4a: ./wx:parent-tag() promotes the <main> link over the <footer> link.
+
+    The footer link appears first in document order, so BFS would fetch it
+    first; provenance scoring flips that — main is crawled before footer.
+    """
+    expr = ("url('http://test/')//url(//a/@href, "
+            "priority=(if (./wx:parent-tag() = 'main') then 10 else 1))")
+    results = _run_provenance(monkeypatch, expr)
+    assert [e.base_url for e in results] == [
+        "http://test/main.html",   # parent-tag main ⇒ score 10
+        "http://test/foot.html",   # parent-tag footer ⇒ score 1
+    ]
+
+
+def test_engine_wx_depth_in_priority_regression(monkeypatch):
+    """Regression (M4 §0 / corrects M3 §4.3): a `wx:` function with a leading
+    axis evaluates inside priority= without raising XPathContextRequired."""
+    # depth at discovery is 1 (links found on the depth-0 root); 10 - 1 = 9.
+    expr = "url('http://test/')//url(//a/@href, priority=10 - /wx:depth())"
+    results = _run_provenance(monkeypatch, expr)
+    # Both links score equally (same depth) ⇒ no crash, BFS tiebreak preserved.
+    assert {e.base_url for e in results} == {
+        "http://test/main.html", "http://test/foot.html"}
+
+
 def test_engine_run__crawl(monkeypatch):
     """A single `url()` segment should yield the parsed root element."""
     pages = {

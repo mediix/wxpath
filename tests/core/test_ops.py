@@ -584,3 +584,26 @@ class TestPriorityScoring:
         # A non-numeric / unresolvable expr must not crash the crawl.
         intents = self._crawl_intents("url(//a/@href, priority=string(./@nope))")
         assert all(i.score == 0.0 for i in intents)
+
+    # --- M4a: provenance functions work in the scoring path ----------------
+
+    def test_priority_uses_provenance_parent_tag(self):
+        # ./wx:parent-tag() distinguishes the in-nav link from the body links:
+        # demote nav boilerplate (score 1), promote the rest (score 10).
+        intents = self._crawl_intents(
+            "url(//a/@href, "
+            "priority=(if (./wx:parent-tag() = 'nav') then 1 else 10))")
+        by_url = {i.url: i.score for i in intents}
+        assert by_url["https://ex.com/in-nav"] == 1.0
+        assert by_url["https://ex.com/low"] == 10.0
+        assert by_url["https://ex.com/high"] == 10.0
+
+    def test_priority_uses_provenance_link_density(self):
+        # The in-nav link's containing block is the <nav> (1 link / "nav" text),
+        # so it has positive density; the bare body links have none.
+        intents = self._crawl_intents(
+            "url(//a/@href, priority=./wx:link-density())")
+        by_url = {i.url: i.score for i in intents}
+        assert by_url["https://ex.com/in-nav"] > 0.0
+        assert by_url["https://ex.com/low"] == 0.0
+        assert by_url["https://ex.com/high"] == 0.0

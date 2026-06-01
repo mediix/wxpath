@@ -47,8 +47,8 @@
 > `boost=` cannot express pure-absolute priority, whereas absolute priority can
 > express boost-over-depth in-expression once depth is reachable from a scoring
 > expression — structural-axis relativity (`priority = 10 - count(./ancestor::*)`)
-> works today; the `priority = N - wx:depth()` form lands with **M4** (which wires
-> `wx:` functions into the scoring context — see §4.3).
+> works today — as does the `priority = N - /wx:depth()` form (leading-axis `wx:`
+> calls already evaluate in the scoring context; see §4.3 and M4a).
 
 M2 committed the **engine** to *"lower `CrawlTask.priority` value = popped sooner"*
 (min-first heap; `priority=depth` ⇒ BFS). M2's plan explicitly deferred the
@@ -245,12 +245,18 @@ any failure return a neutral `0.0` rather than aborting the crawl).
 > working. Verified by `test_ops.py::TestPriorityScoring` (`count(./ancestor::nav)`
 > → 1 for an in-nav link, 0 otherwise).
 >
-> **M4 boundary.** `wx:*` functions in a `priority=` expression are **not yet**
-> supported (they raise `XPathContextRequired` under `item=`-rooting because they
-> expect an elementpath-wrapped context item). Plain XPath — attributes, arithmetic,
-> `number()`/`count()`/`string-length()`, and structural axes — is fully supported.
-> Wiring `wx:` into the scoring context (so e.g. `priority = 10 - wx:depth()` works)
-> is **M4** territory, alongside the new provenance `wx:` functions.
+> **`wx:` in `priority=` (corrected by M4).** An earlier draft of this note claimed
+> `wx:*` functions were "not yet supported" in `priority=` under `item=`-rooting. That
+> was a **false alarm** — they work today, provided they are called with a **leading
+> axis** (`/wx:depth()` or `./wx:link-density()`), never bare. A bare `wx:depth()`
+> raises `XPathContextRequired` only because elementpath constant-folds a zero-arg
+> function with `context=None`; the leading `/` (or `./`) forces dynamic evaluation
+> against the anchor. So the M3 evaluator already carries the full `wx:` + structural
+> family — `priority = 10 - /wx:depth()` evaluates here unchanged. **M4a** then *adds*
+> new provenance functions (`wx:link-density()`, `wx:parent-tag()`, `wx:anchor-text()`,
+> `wx:ancestor-path()`); it does not change this evaluator. See
+> [M4-link-provenance.md §0](./M4-link-provenance.md) and the regression
+> `test_engine.py::test_engine_wx_depth_in_priority_regression`.
 
 Registrations to add:
 
@@ -373,5 +379,6 @@ pre-M3 baseline (dark-ship when no `priority=` is present).
       M2 baseline: `d0:1 d1:4 d2:16 d3:64 d4:256 d5:171`, 511 extractions.
 - [x] Full suite green (269 tests, +11 for M3). Convention (§2) = `priority=`, higher
       = sooner, negated (option A), confirmed with the user 2026-05-30.
-- [ ] *(deferred)* `follow=`+`priority=` seed combos (§8 step 4); `wx:` functions in
-      `priority=` (folds into M4 — see §4.3).
+- [x] `wx:` functions in `priority=` — confirmed working via leading axis (no code
+      change needed; M3 §4.3 note corrected by M4a).
+- [ ] *(deferred)* `follow=`+`priority=` seed combos (§8 step 4).
