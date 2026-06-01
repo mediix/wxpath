@@ -1,0 +1,25 @@
+name: thousand_host_broad
+kind: thousand_host
+runnable: false
+description: Broad crawl across ~1k diverse domains (Nutch/StormCrawler tradition).
+seeds:
+  type: manifest
+  path: ../corpora/thousand_host_manifest.yaml
+path_expr: "//a/@href"
+max_depth: 2
+limits:
+  max_urls: 1000000
+  wall_clock_seconds: 14400
+settings_overrides:
+  http.client.crawler.concurrency: 64
+  http.client.crawler.per_host: 2
+  http.client.crawler.respect_robots: true
+  http.client.crawler.timeout: 15
+tags:
+  - broad
+  - scale
+notes: |
+  Requires: (1) a manifest-loader for large seed sets, (2) per-host queue
+  metrics to compare against StormCrawler's ~400 pages/s reference on the
+  2017 OVH 8c/64GB baseline. Reference run target: throughput at concurrency=64
+  with crawl-delay adherence p95 within 10%.

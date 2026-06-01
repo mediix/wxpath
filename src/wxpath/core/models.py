@@ -12,13 +12,15 @@ class CrawlTask:
     backlink: Optional[str] = None
     base_url: Optional[str] = None
     
-    # Priority for the queue (lower number = higher priority)
-    # Useful if you want Depth-First behavior in a shared queue
-    priority: int = field(default=0)
+    # Priority for the queue (lower number = higher priority / popped sooner).
+    # Defaults to depth (→ BFS); an explicit priority is honored (M2+/M3 scoring).
+    priority: Optional[int] = field(default=None)
 
     def __post_init__(self):
-        # Automatically sync priority with depth for BFS behavior
-        self.priority = self.depth
+        # Sync priority with depth for BFS behavior ONLY when not explicitly set,
+        # so a caller-supplied priority survives (frontier orders by it).
+        if self.priority is None:
+            self.priority = self.depth
 
     def __lt__(self, other):
         return self.priority < other.priority
@@ -46,6 +48,15 @@ class Result(Intent):
 class CrawlIntent(Intent):
     url: str             # "I found this link"
     next_segments: list  # "Here is what to do next if you go there"
+    # M3: per-link priority from a `priority=` expression (higher = sooner).
+    # None means "unscored" → the engine falls back to depth (BFS, Invariant I5).
+    # The engine negates this into CrawlTask.priority (lower = popped sooner).
+    score: float | None = None
+    # M5: visible anchor text of the discovered link, captured at discovery for the
+    # semantic scorer. Ephemeral — read at the engine chokepoint, never carried onto
+    # CrawlTask or persisted. None when no anchor was resolved (the default path).
+    anchor_text: str | None = None
+    # provenance: "Provenance | None" = None   # ← M4
 
 
 @dataclass(slots=True)

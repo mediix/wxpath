@@ -1,6 +1,7 @@
 import pytest
 from lxml import html
 
+import wxpath.patches  # noqa: F401  (registers xpath3 + WXPathParser on lxml)
 from wxpath.core import ops
 from wxpath.core.models import (
     CrawlIntent,
@@ -16,7 +17,17 @@ from wxpath.core.ops import (
     get_operator,
     register,
 )
-from wxpath.core.parser import Binary, ContextItem, Segments, String, Url, UrlCrawl, Xpath
+from wxpath.core.parser import (
+    Binary,
+    ContextItem,
+    Segments,
+    String,
+    Url,
+    UrlCrawl,
+    Xpath,
+    parse,
+)
+from wxpath.core.runtime.helpers import parse_html
 
 
 # ---------------------------------------------------------------------------
@@ -502,7 +513,97 @@ class TestHandleBinary:
 
         op = get_operator(binary)
         with pytest.raises(
-            ValueError, 
+            ValueError,
             match="Binary operation on segments expects non-empty segments"
         ):
             list(op(elem, binary, 0))
+
+
+# ---------------------------------------------------------------------------
+# M3 — declarative scoring: ops set CrawlIntent.score from priority=
+# ---------------------------------------------------------------------------
+class TestPriorityScoring:
+    HTML = b"""<html><body>
+        <a name="top">no-href</a>
+        <a href="/low"  data-rank="1">low</a>
+        <a href="/high" data-rank="9">high</a>
+        <nav><a href="/in-nav" data-rank="5">nav</a></nav>
+    </body></html>"""
+
+    def _root(self):
+        return parse_html(self.HTML, base_url="https://ex.com/",
+                          backlink=None, depth=0, response=None)
+
+    def _crawl_intents(self, expr):
+        segs = parse(expr)
+        op = get_operator(segs[0])
+        intents = list(op(self._root(), segs, 0))
+        return [i for i in intents if isinstance(i, CrawlIntent)]
+
+    def test_no_priority_yields_score_none(self):
+        intents = self._crawl_intents("url(//a/@href)")
+        assert [i.url for i in intents] == [
+            "https://ex.com/low", "https://ex.com/high", "https://ex.com/in-nav"]
+        assert all(i.score is None for i in intents)
+
+    def test_constant_priority_applies_to_all(self):
+        intents = self._crawl_intents("url(//a/@href, priority=10)")
+        assert all(i.score == 10.0 for i in intents)
+
+    def test_dynamic_priority_reads_anchor_attribute(self):
+        intents = self._crawl_intents("url(//a/@href, priority=number(./@data-rank))")
+        by_url = {i.url: i.score for i in intents}
+        assert by_url == {
+            "https://ex.com/low": 1.0,
+            "https://ex.com/high": 9.0,
+            "https://ex.com/in-nav": 5.0,
+        }
+
+    def test_dynamic_priority_uses_structural_axis(self):
+        # This is the case that fails if the score is evaluated rooted AT the
+        # anchor (ancestor:: would see nothing). _eval_score roots at the doc.
+        intents = self._crawl_intents("url(//a/@href, priority=count(./ancestor::nav))")
+        by_url = {i.url: i.score for i in intents}
+        assert by_url["https://ex.com/in-nav"] == 1.0
+        assert by_url["https://ex.com/low"] == 0.0
+        assert by_url["https://ex.com/high"] == 0.0
+
+    def test_triple_slash_scores_and_carries_forward(self):
+        # ///url(...) scores at this level AND re-wraps with the Score so deeper
+        # levels keep scoring (the inner UrlCrawl carries [xpath, Score, url]).
+        intents = self._crawl_intents(
+            "///url(//a/@href, priority=number(./@data-rank))")
+        by_url = {i.url: i.score for i in intents}
+        assert by_url["https://ex.com/high"] == 9.0
+        # the re-wrapped inner segment carries the Score node forward
+        from wxpath.core.parser import Score
+        inner = intents[0].next_segments[0]
+        assert any(isinstance(a, Score) for a in inner.args)
+
+    def test_invalid_priority_expression_coerces_to_zero(self):
+        # A non-numeric / unresolvable expr must not crash the crawl.
+        intents = self._crawl_intents("url(//a/@href, priority=string(./@nope))")
+        assert all(i.score == 0.0 for i in intents)
+
+    # --- M4a: provenance functions work in the scoring path ----------------
+
+    def test_priority_uses_provenance_parent_tag(self):
+        # ./wx:parent-tag() distinguishes the in-nav link from the body links:
+        # demote nav boilerplate (score 1), promote the rest (score 10).
+        intents = self._crawl_intents(
+            "url(//a/@href, "
+            "priority=(if (./wx:parent-tag() = 'nav') then 1 else 10))")
+        by_url = {i.url: i.score for i in intents}
+        assert by_url["https://ex.com/in-nav"] == 1.0
+        assert by_url["https://ex.com/low"] == 10.0
+        assert by_url["https://ex.com/high"] == 10.0
+
+    def test_priority_uses_provenance_link_density(self):
+        # The in-nav link's containing block is the <nav> (1 link / "nav" text),
+        # so it has positive density; the bare body links have none.
+        intents = self._crawl_intents(
+            "url(//a/@href, priority=./wx:link-density())")
+        by_url = {i.url: i.score for i in intents}
+        assert by_url["https://ex.com/in-nav"] > 0.0
+        assert by_url["https://ex.com/low"] == 0.0
+        assert by_url["https://ex.com/high"] == 0.0

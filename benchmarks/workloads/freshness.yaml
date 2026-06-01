@@ -1,0 +1,26 @@
+name: freshness_high_churn
+kind: freshness
+runnable: false
+description: Recrawl 1k high-churn URLs over T hours; measure E[F(p,t)] and E[A(p,t)].
+seeds:
+  type: file
+  path: ../corpora/freshness_targets.txt
+path_expr: "//time/@datetime | //meta[@property='article:modified_time']/@content"
+max_depth: 1
+limits:
+  max_urls: 1000
+  wall_clock_seconds: 86400
+settings_overrides:
+  http.client.crawler.concurrency: 16
+  http.client.crawler.per_host: 1
+  http.client.crawler.respect_robots: true
+  http.client.crawler.timeout: 15
+tags:
+  - incremental
+  - cho-garcia-molina
+notes: |
+  Requires: (1) incremental crawl mode in wxpath (revisit URLs on a schedule),
+  (2) Last-Modified / ETag / content-digest tracking per URL across runs,
+  (3) Poisson rate-of-change estimator. Implements the Cho/Garcia-Molina 2003
+  freshness framework — F(p,t), A(p,t), E[F], E[A] under varying refresh
+  policies. Not runnable until wxpath gains a recrawl loop.

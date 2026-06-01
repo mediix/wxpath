@@ -1,0 +1,21 @@
+name: single_host_docs_python
+kind: single_host
+runnable: true
+description: Depth-2 anchor extraction on docs.python.org (v0 smoke).
+seeds:
+  type: file
+  path: ../corpora/docs_python_seed.txt
+path_expr: "//a/@href"
+max_depth: 2
+limits:
+  max_urls: 200
+  wall_clock_seconds: 120
+settings_overrides:
+  http.client.crawler.concurrency: 4
+  http.client.crawler.per_host: 2
+  http.client.crawler.respect_robots: true
+  http.client.crawler.timeout: 15
+  http.client.cache.enabled: false
+tags:
+  - politeness
+  - baseline

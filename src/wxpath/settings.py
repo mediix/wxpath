@@ -66,6 +66,38 @@ SETTINGS = {
                 'auto_throttle_max_delay': 10.0,
                 'respect_robots': True,
             },
+            'frontier': {
+                'backend': "memory",      # memory | sqlite | redis
+                'resume': False,          # reattach to an existing frontier vs reset
+                'poll_interval': 0.02,    # seconds; sqlite/redis empty-queue poll cadence
+                'sqlite': {
+                    'path': ".wxpath_frontier.db",
+                },
+                'redis': {
+                    'address': 'redis://localhost:6379/0',
+                    'namespace': "wxpath:frontier",
+                },
+                # M4b: deterministic URL-path-repeat trap detection. Off by default
+                # so the default frontier object graph is identical to pre-M4b and
+                # default crawls stay byte-identical (Invariant I5). When enabled,
+                # get_frontier_backend() wraps the backend in a TrapFilterFrontier.
+                'trap': {
+                    'enabled': False,        # wrap backend with the trap filter
+                    'max_path_repeat': 3,    # consecutive cycle repeats allowed before dropping
+                    'max_period': 4,         # largest cycle length scanned for
+                },
+                # M5: pluggable frontier scoring. 'deterministic' (default) passes
+                # through the M3/M4 priority= score → engine enqueue path is identical
+                # to pre-M5 (Invariant I5/I10). 'semantic' orders links by relevance of
+                # anchor_text+url to `objective` using an injected embedder (the
+                # wxpath[semantic] extra) — traversal ORDER only, never extracted DATA.
+                'scorer': "deterministic",   # deterministic | semantic
+                'objective': "",             # semantic target objective (semantic only)
+                'semantic': {
+                    'model': "all-MiniLM-L6-v2",  # reference embedder model id
+                    'cache': True,                # cache scores by anchor text
+                },
+            },
         },
     },
 }
@@ -108,3 +140,4 @@ class AttrDict(dict):
 SETTINGS = AttrDict(SETTINGS)
 CACHE_SETTINGS = SETTINGS.http.client.cache
 CRAWLER_SETTINGS = SETTINGS.http.client.crawler
+FRONTIER_SETTINGS = SETTINGS.http.client.frontier

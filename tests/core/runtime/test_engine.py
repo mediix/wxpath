@@ -54,6 +54,279 @@ class _FakeCrawlerWithStatus:
 # --------------------------------------------------------------------------- #
 # Tests
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# M3 — declarative scoring (priority=) end-to-end
+# --------------------------------------------------------------------------- #
+# A page whose links are in document order low, high, mid but carry data-rank
+# 1, 9, 5. Pure BFS fetches them in document order; a priority= score reorders
+# the frontier so the highest-ranked page is fetched first.
+_SCORING_PAGES = {
+    'http://test/': b"""<html><body>
+        <a href="low.html"  data-rank="1">low</a>
+        <a href="high.html" data-rank="9">high</a>
+        <a href="mid.html"  data-rank="5">mid</a>
+    </body></html>""",
+    'http://test/low.html':  b"<html><body><p>low</p></body></html>",
+    'http://test/high.html': b"<html><body><p>high</p></body></html>",
+    'http://test/mid.html':  b"<html><body><p>mid</p></body></html>",
+}
+
+
+def _run_scoring(monkeypatch, expr, max_depth=1):
+    monkeypatch.setattr(
+        engine, "Crawler",
+        lambda *a, **k: MockCrawler(*a, pages=_SCORING_PAGES, **k),
+    )
+    return asyncio.run(_collect_async(engine.WXPathEngine().run(expr, max_depth=max_depth)))
+
+
+def test_engine_priority_orders_fetches(monkeypatch):
+    """Dynamic priority=: highest @data-rank is fetched first (not doc order)."""
+    expr = "url('http://test/')//url(//a/@href, priority=number(./@data-rank))"
+    results = _run_scoring(monkeypatch, expr)
+    assert [e.base_url for e in results] == [
+        "http://test/high.html",  # rank 9
+        "http://test/mid.html",   # rank 5
+        "http://test/low.html",   # rank 1
+    ]
+
+
+def test_engine_constant_priority_keeps_bfs_order(monkeypatch):
+    """A constant priority= ties every link, so the seq tiebreak ⇒ BFS order."""
+    expr = "url('http://test/')//url(//a/@href, priority=5)"
+    results = _run_scoring(monkeypatch, expr)
+    assert [e.base_url for e in results] == [
+        "http://test/low.html",
+        "http://test/high.html",
+        "http://test/mid.html",
+    ]
+
+
+def test_engine_no_priority_is_pure_bfs(monkeypatch):
+    """Regression / I5: no priority= ⇒ document (BFS) order, unchanged."""
+    expr = "url('http://test/')//url(//a/@href)"
+    results = _run_scoring(monkeypatch, expr)
+    assert [e.base_url for e in results] == [
+        "http://test/low.html",
+        "http://test/high.html",
+        "http://test/mid.html",
+    ]
+
+
+def test_engine_priority_is_deterministic(monkeypatch):
+    """Same page + same expression ⇒ identical order on every run."""
+    expr = "url('http://test/')//url(//a/@href, priority=number(./@data-rank))"
+    first = [e.base_url for e in _run_scoring(monkeypatch, expr)]
+    second = [e.base_url for e in _run_scoring(monkeypatch, expr)]
+    assert first == second == [
+        "http://test/high.html", "http://test/mid.html", "http://test/low.html"]
+
+
+def test_engine_priority_changes_order_not_data(monkeypatch):
+    """Invariant I4: scoring changes traversal ORDER, never extracted DATA.
+
+    The same pages are visited and the same map{} is extracted regardless of
+    priority; only the order differs.
+    """
+    tail = "/map { 'p': string((//p/text())[1]) }"
+    scored = _run_scoring(
+        monkeypatch,
+        "url('http://test/')//url(//a/@href, priority=number(./@data-rank))" + tail)
+    bfs = _run_scoring(
+        monkeypatch, "url('http://test/')//url(//a/@href)" + tail)
+
+    scored = [dict(r.items()) for r in scored]
+    bfs = [dict(r.items()) for r in bfs]
+
+    assert scored != bfs                       # order differs...
+    assert sorted(map(repr, scored)) == sorted(map(repr, bfs))  # ...data identical
+    assert scored[0] == {"p": "high"}          # high-rank page extracted first
+
+
+# --- M4a: provenance scoring end-to-end -----------------------------------
+
+_PROVENANCE_PAGES = {
+    'http://test/': b"""<html><body>
+        <footer><a href="foot.html">footer link</a></footer>
+        <main><a href="main.html">main link</a></main>
+    </body></html>""",
+    'http://test/main.html': b"<html><body><p>main</p></body></html>",
+    'http://test/foot.html': b"<html><body><p>foot</p></body></html>",
+}
+
+
+def _run_provenance(monkeypatch, expr, pages=_PROVENANCE_PAGES, max_depth=1):
+    monkeypatch.setattr(
+        engine, "Crawler",
+        lambda *a, **k: MockCrawler(*a, pages=pages, **k),
+    )
+    return asyncio.run(_collect_async(engine.WXPathEngine().run(expr, max_depth=max_depth)))
+
+
+def test_engine_provenance_main_before_footer(monkeypatch):
+    """M4a: ./wx:parent-tag() promotes the <main> link over the <footer> link.
+
+    The footer link appears first in document order, so BFS would fetch it
+    first; provenance scoring flips that — main is crawled before footer.
+    """
+    expr = ("url('http://test/')//url(//a/@href, "
+            "priority=(if (./wx:parent-tag() = 'main') then 10 else 1))")
+    results = _run_provenance(monkeypatch, expr)
+    assert [e.base_url for e in results] == [
+        "http://test/main.html",   # parent-tag main ⇒ score 10
+        "http://test/foot.html",   # parent-tag footer ⇒ score 1
+    ]
+
+
+def test_engine_wx_depth_in_priority_regression(monkeypatch):
+    """Regression (M4 §0 / corrects M3 §4.3): a `wx:` function with a leading
+    axis evaluates inside priority= without raising XPathContextRequired."""
+    # depth at discovery is 1 (links found on the depth-0 root); 10 - 1 = 9.
+    expr = "url('http://test/')//url(//a/@href, priority=10 - /wx:depth())"
+    results = _run_provenance(monkeypatch, expr)
+    # Both links score equally (same depth) ⇒ no crash, BFS tiebreak preserved.
+    assert {e.base_url for e in results} == {
+        "http://test/main.html", "http://test/foot.html"}
+
+
+# --- M5: semantic frontier scoring end-to-end -----------------------------
+
+# Root links, in document order: an OFF-topic link first, an ON-topic link second.
+# Pure BFS fetches them in document order (off, on). A semantic scorer keyed to the
+# objective reorders the frontier so the on-topic page is fetched first — while the
+# extracted data stays identical (Invariant I4/I10).
+_SEMANTIC_PAGES = {
+    'http://test/': b"""<html><body>
+        <a href="off.html">celebrity gossip news</a>
+        <a href="on.html">lithium battery recycling guide</a>
+    </body></html>""",
+    'http://test/on.html':  b"<html><body><p>on</p></body></html>",
+    'http://test/off.html': b"<html><body><p>off</p></body></html>",
+}
+
+_SEMANTIC_VOCAB = ["lithium", "battery", "recycling", "guide",
+                   "celebrity", "gossip", "news"]
+
+
+class _BagOfWordsEmbedder:
+    """Deterministic 0/1 bag-of-words embedder over a fixed vocab (no ML dep)."""
+
+    def __init__(self, vocab):
+        self._vocab = list(vocab)
+
+    def embed(self, texts):
+        return [[1.0 if v in set(t.lower().split()) else 0.0 for v in self._vocab]
+                for t in texts]
+
+
+def _run_semantic(monkeypatch, expr, objective, max_depth=1):
+    from wxpath.settings import SETTINGS
+    frontier = SETTINGS.http.client.frontier
+    monkeypatch.setitem(frontier, "scorer", "semantic")
+    monkeypatch.setitem(frontier, "objective", objective)
+    monkeypatch.setattr(
+        "wxpath.http.frontier.embedders.get_embedder",
+        lambda cfg: _BagOfWordsEmbedder(_SEMANTIC_VOCAB),
+    )
+    monkeypatch.setattr(
+        engine, "Crawler",
+        lambda *a, **k: MockCrawler(*a, pages=_SEMANTIC_PAGES, **k),
+    )
+    return asyncio.run(_collect_async(engine.WXPathEngine().run(expr, max_depth=max_depth)))
+
+
+def test_engine_semantic_orders_on_topic_first(monkeypatch):
+    """scorer=semantic: the on-topic link is fetched before the off-topic one,
+    though it appears second in document order (BFS would fetch off first)."""
+    expr = "url('http://test/')//url(//a/@href)"
+    results = _run_semantic(monkeypatch, expr, objective="lithium battery recycling")
+    assert [e.base_url for e in results] == [
+        "http://test/on.html",    # on-topic anchor ⇒ higher cosine ⇒ popped first
+        "http://test/off.html",   # off-topic anchor ⇒ cosine 0 ⇒ popped last
+    ]
+
+
+def test_engine_semantic_changes_order_not_data(monkeypatch):
+    """Invariant I4/I10: the semantic scorer changes ORDER, never extracted DATA.
+
+    The same map{} records are produced as a plain BFS crawl; only order differs.
+    """
+    tail = "/map { 'p': string((//p/text())[1]) }"
+    expr = "url('http://test/')//url(//a/@href)" + tail
+    semantic = _run_semantic(monkeypatch, expr, objective="lithium battery recycling")
+
+    # Re-run the same pages with the default deterministic scorer → BFS order.
+    from wxpath.settings import SETTINGS
+    monkeypatch.setitem(SETTINGS.http.client.frontier, "scorer", "deterministic")
+    bfs = asyncio.run(_collect_async(engine.WXPathEngine().run(expr, max_depth=1)))
+
+    semantic = [dict(r.items()) for r in semantic]
+    bfs = [dict(r.items()) for r in bfs]
+    assert semantic != bfs                                        # order differs...
+    assert sorted(map(repr, semantic)) == sorted(map(repr, bfs))  # ...data identical
+    assert semantic[0] == {"p": "on"}                             # on-topic extracted first
+
+
+# --- M4b: trap detection end-to-end ---------------------------------------
+
+_TRAP_PAGES = {
+    # root links into a self-deepening period-2 cycle AND a legit deep chain
+    'http://t/': b'<html><body>'
+                 b'<a href="http://t/loop/a/b">loop</a>'
+                 b'<a href="http://t/docs/d1">docs</a>'
+                 b'</body></html>',
+    'http://t/loop/a/b': b'<html><body>'
+                         b'<a href="http://t/loop/a/b/a/b">deeper</a></body></html>',
+    'http://t/loop/a/b/a/b': b'<html><body>'
+                             b'<a href="http://t/loop/a/b/a/b/a/b">deeper</a></body></html>',
+    'http://t/loop/a/b/a/b/a/b': b'<html><body><p>trap leaf</p></body></html>',
+    'http://t/docs/d1': b'<html><body>'
+                        b'<a href="http://t/docs/d1/d2">d2</a></body></html>',
+    'http://t/docs/d1/d2': b'<html><body>'
+                           b'<a href="http://t/docs/d1/d2/d3">d3</a></body></html>',
+    'http://t/docs/d1/d2/d3': b'<html><body><p>docs leaf</p></body></html>',
+}
+
+
+def _run_trap(monkeypatch, frontier, max_depth=3):
+    monkeypatch.setattr(
+        engine, "Crawler",
+        lambda *a, **k: MockCrawler(*a, pages=_TRAP_PAGES, **k),
+    )
+    eng = WXPathEngine(frontier=frontier)
+    expr = "url('http://t/')///url(//a/@href)"
+    results = asyncio.run(_collect_async(eng.run(expr, max_depth=max_depth)))
+    return {e.base_url for e in results}
+
+
+def test_engine_trap_pruned_legit_chain_survives(monkeypatch):
+    """M4b acceptance: the URL-path-repeat trap is pruned at the threshold while a
+    legitimate deep chain of equal length is crawled in full."""
+    from wxpath.http.frontier.memory import InMemoryFrontier
+    from wxpath.http.frontier.trap import TrapFilterFrontier
+
+    frontier = TrapFilterFrontier(
+        InMemoryFrontier(), max_path_repeat=2, max_period=4)
+    crawled = _run_trap(monkeypatch, frontier)
+
+    # period-2 cycle a/b repeated 3× (reps=3 > 2) is dropped at push...
+    assert "http://t/loop/a/b/a/b/a/b" not in crawled
+    assert frontier.dropped == 1
+    # ...but the shallower loop pages (reps ≤ 2) and the full legit chain survive.
+    assert "http://t/loop/a/b/a/b" in crawled
+    assert "http://t/docs/d1/d2/d3" in crawled
+
+
+def test_engine_no_trap_filter_crawls_everything(monkeypatch):
+    """Contrast: without the filter the same trap URL IS fetched — proving the
+    prune above is the filter's doing, not a missing fixture page."""
+    from wxpath.http.frontier.memory import InMemoryFrontier
+
+    crawled = _run_trap(monkeypatch, InMemoryFrontier())
+    assert "http://t/loop/a/b/a/b/a/b" in crawled
+    assert "http://t/docs/d1/d2/d3" in crawled
+
+
 def test_engine_run__crawl(monkeypatch):
     """A single `url()` segment should yield the parsed root element."""
     pages = {

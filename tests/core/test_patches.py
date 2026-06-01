@@ -412,3 +412,80 @@ class TestWXPathFunctions:
         hrefs = [str(link) for link in result]
         # Should include external.com but not bbc.co.uk
         assert any("external.com" in href for href in hrefs)
+
+
+class TestProvenanceFunctions:
+    """M4a: link-provenance wx:* functions evaluated against a link anchor.
+
+    The functions are designed to run with the discovered link's anchor element
+    as the context item (the M3 scoring convention) — exercised here by selecting
+    ``./wx:fn()`` relative to a chosen ``<a>`` node.
+    """
+
+    PAGE = """
+    <html><body>
+      <main><div class="content">
+        <p>Some real prose here with a number of words and a link.</p>
+        <a href="/article">Read the full article now</a>
+      </div></main>
+      <footer><nav>
+        <a href="/a">A</a><a href="/b">B</a><a href="/c">C</a><a href="/d">D</a>
+      </nav></footer>
+      <p><a href="/bare">Bare link</a></p>
+    </body></html>
+    """
+
+    def _root(self):
+        root = html.fromstring(self.PAGE, parser=html_parser_with_xpath3)
+        root.base_url = "http://example.com/"
+        return root
+
+    def _anchor(self, root, xpath):
+        return root.xpath(xpath)[0]
+
+    def test_anchor_text(self):
+        """wx:anchor-text() returns the trimmed visible text of the anchor."""
+        root = self._root()
+        a = self._anchor(root, "//main//a")
+        assert a.xpath3("./wx:anchor-text()") == ["Read the full article now"]
+
+    def test_parent_tag_sectioning_ancestor(self):
+        """wx:parent-tag() returns the nearest sectioning ancestor tag."""
+        root = self._root()
+        a_main = self._anchor(root, "//main//a")
+        a_foot = self._anchor(root, "//footer//a")
+        # footer link is wrapped in <nav> — the nearest section wins over footer
+        assert a_main.xpath3("./wx:parent-tag()") == ["main"]
+        assert a_foot.xpath3("./wx:parent-tag()") == ["nav"]
+
+    def test_parent_tag_falls_back_to_immediate_parent(self):
+        """With no sectioning ancestor, wx:parent-tag() returns the parent tag."""
+        root = self._root()
+        a_bare = self._anchor(root, "//a[@href='/bare']")
+        assert a_bare.xpath3("./wx:parent-tag()") == ["p"]
+
+    def test_link_density_sparse_vs_dense(self):
+        """wx:link-density() is low for prose blocks, high for link lists."""
+        root = self._root()
+        a_main = self._anchor(root, "//main//a")
+        a_foot = self._anchor(root, "//footer//a")
+        # numeric functions return a bare float (not wrapped in a list)
+        dens_main = a_main.xpath3("./wx:link-density()")
+        dens_foot = a_foot.xpath3("./wx:link-density()")
+        assert 0.0 < dens_main < 0.1   # one link amid prose
+        assert dens_foot > dens_main   # pure link list is much denser
+
+    def test_ancestor_path(self):
+        """wx:ancestor-path() is the root→anchor tag path."""
+        root = self._root()
+        a_main = self._anchor(root, "//main//a")
+        a_foot = self._anchor(root, "//footer//a")
+        assert a_main.xpath3("./wx:ancestor-path()") == ["html/body/main/div/a"]
+        assert a_foot.xpath3("./wx:ancestor-path()") == ["html/body/footer/nav/a"]
+
+    def test_provenance_functions_require_context(self):
+        """Bare calls (no leading axis) raise XPathContextRequired."""
+        root = self._root()
+        for fn in ("anchor-text", "parent-tag", "link-density", "ancestor-path"):
+            with pytest.raises(XPathContextRequired):
+                root.xpath3(f"wx:{fn}()")

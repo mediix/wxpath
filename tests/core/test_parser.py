@@ -9,12 +9,14 @@ from wxpath.core.parser import (
     Name,
     Number,
     Parser,
+    Score,
     Segments,
     String,
     Token,
     Url,
     UrlCrawl,
     UrlLiteral,
+    UrlQuery,
     Wxpath,
     Xpath,
     find_wxpath_boundary,
@@ -439,3 +441,93 @@ class TestComplexExpressions:
         assert isinstance(url_node, Url)
         assert url_node.args[1] == Xpath("//a/@href[contains(., 'example')]")
         assert url_node.args[2] == Depth(2)
+
+
+# =============================================================================
+# M3 — Declarative Scoring (priority=) Tests
+# =============================================================================
+
+class TestPriorityScoring:
+    """The ``priority=`` DSL surface (M3). Convention: higher value = sooner;
+    a numeric literal becomes a constant Score, anything else an xpath Score."""
+
+    def test_tokenize_priority(self):
+        # The optional leading comma + whitespace are absorbed into the token,
+        # exactly like follow= / depth=.
+        tokens = list(tokenize(", priority="))
+        assert tokens[0].type == "PRIORITY"
+
+    def test_priority_constant_int(self):
+        result = parse("url(//a/@href, priority=10)")
+        assert isinstance(result, Segments)
+        node = result[0]
+        assert isinstance(node, UrlQuery)
+        assert node.args[0] == Xpath("//a/@href")
+        assert node.args[1] == Score("10", const=10.0)
+
+    def test_priority_constant_float(self):
+        result = parse("url(//a/@href, priority=3.5)")
+        assert result[0].args[1] == Score("3.5", const=3.5)
+
+    def test_priority_constant_negative(self):
+        # '-3' tokenizes as OP '-' then INTEGER '3'; both land in the buffer.
+        result = parse("url(//a/@href, priority=-3)")
+        assert result[0].args[1] == Score("-3", const=-3.0)
+
+    def test_priority_xpath_expression(self):
+        # A non-numeric value is an xpath expression (const stays None), and its
+        # inner parens are captured whole.
+        result = parse("url(//a/@href, priority=number(./@data-rank))")
+        score = result[0].args[1]
+        assert isinstance(score, Score)
+        assert score.expr == "number(./@data-rank)"
+        assert score.const is None
+
+    def test_priority_on_triple_slash_url(self):
+        result = parse("///url(//a/@href, priority=count(./ancestor::article))")
+        node = result[0]
+        assert isinstance(node, UrlCrawl)
+        assert node.func == "///url"
+        assert node.args[0] == Xpath("//a/@href")
+        assert node.args[1] == Score("count(./ancestor::article)", const=None)
+
+    def test_priority_on_single_and_double_slash_url(self):
+        for expr, fn in [("/url(@href, priority=5)", "/url"),
+                         ("//url(@href, priority=number(@rank))", "//url")]:
+            node = parse(expr)[0]
+            assert isinstance(node, UrlQuery)
+            assert node.func == fn
+            assert isinstance(node.args[1], Score)
+
+    def test_priority_on_literal_seed(self):
+        result = parse("url('https://shop.example/', priority=10)")
+        node = result[0]
+        assert isinstance(node, UrlLiteral)
+        assert node.args[0] == String("https://shop.example/")
+        assert node.args[1] == Score("10", const=10.0)
+
+    def test_priority_in_full_expression(self):
+        # The roadmap's headline form: literal seed then a scored recursive crawl.
+        result = parse("url('https://shop.example/')"
+                       "///url(//a/@href, priority=10)")
+        assert isinstance(result, Segments)
+        assert isinstance(result[0], UrlLiteral)
+        assert isinstance(result[1], UrlCrawl)
+        assert result[1].args[1] == Score("10", const=10.0)
+
+    # --- regressions: no priority= must parse exactly as before -------------
+
+    def test_no_priority_is_unchanged(self):
+        result = parse("url(//a/@href)")
+        assert len(result[0].args) == 1
+        assert result[0].args[0] == Xpath("//a/@href")
+        assert not any(isinstance(a, Score) for a in result[0].args)
+
+    def test_follow_depth_unaffected_by_priority_support(self):
+        result = parse("url('http://example.com', "
+                       "follow=//a/@href[contains(., 'x')], depth=2)")
+        node = result[0]
+        assert node.args[0] == String("http://example.com")
+        assert node.args[1] == Xpath("//a/@href[contains(., 'x')]")
+        assert node.args[2] == Depth(2)
+        assert not any(isinstance(a, Score) for a in node.args)
