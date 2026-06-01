@@ -102,6 +102,18 @@ SETTINGS = {
                     'drop_fragment': True,             # discard #fragment (client-side only)
                     'normalize_trailing_slash': True,  # /p/1/ -> /p/1 (non-root)
                 },
+                # M6 layer 2: content-fingerprint near-duplicate dedup. Off by
+                # default so the engine processing path is byte-identical to
+                # pre-layer-2 (Invariant I5). When enabled, the engine constructs a
+                # SimHashDeduper (get_content_deduper()) and, after parse, skips
+                # pages whose main-content SimHash is within hamming_threshold bits
+                # of an already-recorded page (recorded once). Deterministic: stable
+                # BLAKE2b hash + deterministic crawl order (Invariant I12).
+                'fingerprint': {
+                    'enabled': False,            # construct SimHashDeduper vs NullDeduper
+                    'hamming_threshold': 3,      # max differing bits to call two pages near-dup
+                    'shingle_size': 4,           # words per content shingle
+                },
                 # M5: pluggable frontier scoring. 'deterministic' (default) passes
                 # through the M3/M4 priority= score → engine enqueue path is identical
                 # to pre-M5 (Invariant I5/I10). 'semantic' orders links by relevance of

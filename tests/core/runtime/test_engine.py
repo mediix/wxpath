@@ -1972,3 +1972,50 @@ def test_engine_without_canonical_fetches_each_variant(monkeypatch):
     _results, child_fetches = _run_canon(monkeypatch, enabled=False)
     assert len(child_fetches) == 4
     assert len(set(child_fetches)) == 4
+
+
+# --------------------------------------------------------------------------- #
+# M6 layer 2 — content-fingerprint near-dup dedup (end-to-end)
+# --------------------------------------------------------------------------- #
+# /a and /b are distinct URLs serving IDENTICAL article bodies. Both are fetched
+# (dedup is post-parse), but with fingerprinting on only the FIRST is recorded —
+# the near-duplicate is skipped (FRONTIER_ROADMAP M6 layer 2). With it off, both
+# are recorded.
+_DUP_ARTICLE = (
+    b"<article><p>"
+    b"The migratory patterns of arctic terns span pole to pole each year, "
+    b"the longest known migration of any animal, a remarkable feat of endurance "
+    b"and navigation repeated across the bird's three-decade lifespan."
+    b"</p></article>"
+)
+_FINGERPRINT_PAGES = {
+    "http://test/": (
+        b"<html><body><a href='/a'>A</a><a href='/b'>B</a></body></html>"
+    ),
+    "http://test/a": b"<html><body>" + _DUP_ARTICLE + b"</body></html>",
+    "http://test/b": b"<html><body>" + _DUP_ARTICLE + b"</body></html>",  # identical content
+}
+
+
+def _run_fingerprint(monkeypatch, *, enabled: bool):
+    monkeypatch.setattr(
+        engine, "Crawler", lambda *a, **k: MockCrawler(pages=_FINGERPRINT_PAGES)
+    )
+    from wxpath.http import frontier as frontier_pkg
+    monkeypatch.setattr(frontier_pkg.FRONTIER_SETTINGS.fingerprint, "enabled", enabled)
+    eng = engine.WXPathEngine()
+    return asyncio.run(
+        _collect_async(eng.run("url('http://test/')//url(//a/@href)", max_depth=1))
+    )
+
+
+def test_engine_fingerprint_dedups_identical_content(monkeypatch):
+    results = _run_fingerprint(monkeypatch, enabled=True)
+    # /a recorded, /b is a content near-duplicate → skipped.
+    assert len(results) == 1
+
+
+def test_engine_without_fingerprint_records_both(monkeypatch):
+    # Control: fingerprinting off ⇒ both identical-content pages are recorded.
+    results = _run_fingerprint(monkeypatch, enabled=False)
+    assert len(results) == 2

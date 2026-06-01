@@ -20,15 +20,18 @@ pass ships only the first; the second is designed here but deferred.
   memory/sqlite/redis backends, settings-gated, **off by default** so the default
   crawl stays byte-identical (I5).
 
-- **Layer 2 — content-fingerprint near-dup dedup (DEFERRED).** SimHash/shingle over
-  main-content, a fingerprint registry, Hamming-threshold matching. Unlike layer 1
-  it is **not** a pure function of the URL — it needs parsed content *and* new
-  frontier state (a fingerprint registry), which means touching the `Frontier`
-  Protocol and **all three** backends, plus a content extractor. Larger, off the
-  critical path, and independently shippable. See §6.
+- **Layer 2 — content-fingerprint near-dup dedup (NOW IMPLEMENTED, see §6).** SimHash
+  over main-content shingles, a fingerprint registry, Hamming-threshold matching.
+  Unlike layer 1 it needs parsed content, so it integrates at the engine's post-parse
+  point — **as an engine-owned strategy object (the M5 scorer pattern), NOT a Frontier
+  Protocol extension.** This is a deliberate revision of the original deferral note
+  (which assumed a backend-persisted registry): content dedup is an engine concern
+  (it needs the parsed DOM, not URL scheduling), and an ephemeral per-run registry
+  matches how the semantic scorer keeps its state. Layer 2 therefore touches **zero**
+  backends and leaves the Frontier Protocol unchanged. Off by default.
 
-This mirrors M4b, which shipped the cheap URL-only filter and deferred the
-DOM-dependent one.
+Both layers landed in the same milestone; layer 1 first (URL-pure, wrapper), then
+layer 2 (content-dependent, engine strategy).
 
 ---
 
@@ -199,28 +202,67 @@ on → canonical is outermost over trap.
 one** child fetch (`http://test/p/1`); control — with it off, all four variants
 fetched (the bug M6 fixes).
 
-I5: `canonical.enabled` defaults `False`; full suite **354 green**; `local_fixture`
-byte-identical to the M5 baseline (`d0:1 d1:4 d2:16 d3:64 d4:256 d5:171`, 511
-extractions).
+`tests/http/frontier/test_fingerprint.py` (layer 2, 13): pure SimHash (deterministic,
+empty→0, near<far distance, shingle-size honored) + Hamming; `NullDeduper` never
+dedups; `SimHashDeduper` (identical→dup, distinct→kept, empty content never dup nor
+recorded, threshold consulted); factory disabled→Null / enabled→SimHash.
+`tests/core/runtime/test_engine.py` (+2): two URLs serving identical bodies → one
+recorded with fingerprinting on, both with it off.
+
+I5: `canonical.enabled` and `fingerprint.enabled` default `False`; full suite **369
+green**; `local_fixture` byte-identical to the M5 baseline (`d0:1 d1:4 d2:16 d3:64
+d4:256 d5:171`, 511 extractions).
 
 ---
 
-## 6. Deferred / future (Layer 2 and beyond)
+## 6. Layer 2 — content-fingerprint near-dup dedup (`frontier/fingerprint.py`)
 
-- **Content-fingerprint near-dup dedup.** SimHash (or MinHash shingles) over the
-  main-content text (`wx:main-article-text()` in `patches.py` is the natural source),
-  a fingerprint registry in the frontier, Hamming-distance threshold (default ~3),
-  off by default. Requires extending the `Frontier` Protocol with a
-  fingerprint-seen/record pair and implementing it across memory/sqlite/redis (the
-  registry must persist with the backend), plus a post-parse fingerprint hook in the
-  engine. Settings sketch:
-  ```yaml
-  http.client.frontier.fingerprint.enabled: false
-  http.client.frontier.fingerprint.hamming_threshold: 3
-  ```
-  This is its own milestone-sized change; do it when duplicate-content (mirror
-  domains, print views, pagination chrome serving identical bodies) is shown to
-  matter on a real corpus.
+Catches the same *content* served under genuinely different URLs (mirror domains,
+print views, CMS aliases) that layer 1's URL-pure normalization cannot.
+
+**Integration = engine-owned strategy object (the M5 scorer pattern), not a Frontier
+wrapper or Protocol change.** Content dedup needs the parsed DOM, which exists only at
+the engine's post-parse point — not in the frontier (URL scheduling). So a
+`ContentDeduper` is constructed in `run()` via `get_content_deduper()` (mirroring
+`get_frontier_scorer()`) and consulted right after `post_parse_hooks`. Its
+fingerprint registry is **ephemeral per run**, exactly like the semantic scorer's
+embedding cache. This is a deliberate revision of the earlier sketch (which proposed a
+backend-persisted registry + Protocol methods): it touches **zero** backends and
+leaves the `Frontier` Protocol unchanged — cross-resume fingerprint persistence is a
+further deferral (below).
+
+```python
+@runtime_checkable
+class ContentDeduper(Protocol):
+    def is_duplicate(self, elem) -> bool: ...   # records fp if new; True if near-dup
+
+class NullDeduper:        # DEFAULT → never dedups → engine path byte-identical (I5)
+    def is_duplicate(self, elem): return False
+
+class SimHashDeduper:     # opt-in: 64-bit Charikar SimHash over word-shingles
+    # registry = list[int]; match by hamming(fp, prior) <= threshold; first wins
+```
+
+- **Content source:** `main_text_extractor` (the boilerplate-stripping eatiht port
+  behind `wx:main-article-text()`), wrapped defensively — on failure/empty it falls
+  back to all descendant text, then to `""`. Empty/zero fingerprints are never treated
+  as duplicates and never recorded.
+- **Determinism (I12):** SimHash uses a **stable** BLAKE2b hash, never Python's salted
+  `hash()`. With the deterministic crawl order, which of two near-duplicates is
+  kept-vs-skipped is itself deterministic.
+- **Engine gate:** after `post_parse_hooks`, `if deduper.is_duplicate(elem):` →
+  `mark_done` + `continue` (no yield, no link expansion). The first occurrence of any
+  content is kept and expanded; later near-dups are dropped → "recorded once".
+- **Settings:** `http.client.frontier.fingerprint.{enabled, hamming_threshold,
+  shingle_size}` (off by default).
+
+### Deferred / future
+
+- **Cross-resume fingerprint persistence.** The registry is per-run; a resumed sqlite
+  crawl re-records fingerprints from scratch. Persisting them would mean a backend
+  schema/Protocol change — do it only if resume-time content dedup is shown to matter.
+- **LSH banding.** The registry is a linear Hamming scan (fine at single-host scale).
+  A banded LSH index would scale near-dup lookup to very large crawls.
 - **Query-string trap interplay.** Canonicalization stripping `?page=` would mask the
   query-string trap class noted in M4b §6 — keep them distinct; the strip-list is
   for *tracking* params, not pagination.
@@ -234,15 +276,20 @@ extractions).
 
 **Add**
 - `src/wxpath/http/frontier/canonical.py` — `canonicalize`, `_normalize_netloc`,
-  `_matches_any`, `DEFAULT_STRIP_PARAMS`, `CanonicalizingFrontier`.
-- `tests/http/frontier/test_canonical.py`, `test_canonical_frontier.py`
-  (+3 in `test_factory.py`, +2 e2e in `test_engine.py`).
+  `_matches_any`, `DEFAULT_STRIP_PARAMS`, `CanonicalizingFrontier` (layer 1).
+- `src/wxpath/http/frontier/fingerprint.py` — `simhash`, `hamming`, `_content_text`,
+  `ContentDeduper`, `NullDeduper`, `SimHashDeduper`, `get_content_deduper` (layer 2).
+- `tests/http/frontier/test_canonical.py`, `test_canonical_frontier.py`,
+  `test_fingerprint.py` (+3 in `test_factory.py`, +4 e2e in `test_engine.py`).
 
 **Modify**
-- `src/wxpath/settings.py` — `http.client.frontier.canonical` block.
+- `src/wxpath/settings.py` — `http.client.frontier.{canonical,fingerprint}` blocks.
 - `src/wxpath/http/frontier/__init__.py` — wrap when `canonical.enabled` (outermost).
+- `src/wxpath/core/runtime/engine.py` (layer 2) — construct `get_content_deduper()` in
+  `run()` and gate after `post_parse_hooks` (no-op under the default `NullDeduper`).
 
-**No** change to backends, `CrawlTask`/`CrawlIntent`, ops, engine, or parser.
+**No** change to the frontier backends, the `Frontier` Protocol, `CrawlTask`/
+`CrawlIntent`, ops, or parser.
 
 ---
 
@@ -256,6 +303,16 @@ I11 (canonical dedup, M6): URL canonicalization is a pure function of the URL st
     (extends I5). With it enabled, normalization collapses URL variants of the same
     page to a single fetch — affecting which URLs are fetched, never the data
     extracted from a given page (a realization of I4).
+
+I12 (content dedup, M6 layer 2): content-fingerprint near-duplicate detection is an
+    engine-owned strategy (get_content_deduper()), not a frontier concern. It uses a
+    stable BLAKE2b SimHash (never Python's salted hash()), so a fingerprinted crawl is
+    bit-reproducible given the deterministic crawl order (extends I6). With
+    http.client.frontier.fingerprint.enabled off (the default) the deduper is a no-op
+    (NullDeduper) and the engine processing path is byte-identical to pre-layer-2
+    (extends I5). With it on, the first page of any content is kept and its links
+    expanded; later near-duplicates are recorded once — affecting which pages' data is
+    recorded, never the data extracted from the page that is kept (a realization of I4).
 ```
 
 ---
@@ -264,5 +321,9 @@ I11 (canonical dedup, M6): URL canonicalization is a pure function of the URL st
 
 1. `canonical.py` pure `canonicalize()` + `test_canonical.py` green.
 2. `CanonicalizingFrontier` + wrapper/factory tests; settings block; factory wrap.
-3. e2e engine acceptance + control test; full suite + `local_fixture` I5.
-4. Append I11 to FRONTIER_ROADMAP.md; offer to commit.
+3. e2e engine acceptance + control test; full suite + `local_fixture` I5. (layer 1
+   committed `d0e1d2c`.)
+4. `fingerprint.py` (`simhash`/`hamming`/`SimHashDeduper`) + `test_fingerprint.py`;
+   settings `fingerprint` block; engine construct + post-parse gate; e2e dedup test.
+5. Append I11 + I12 to FRONTIER_ROADMAP.md; full suite **369 green** + `local_fixture`
+   I5; PR for the branch.

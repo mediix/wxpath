@@ -25,6 +25,7 @@ from wxpath.http.client.crawler import Crawler
 from wxpath.http.client.request import Request
 from wxpath.http.frontier import Frontier, get_frontier_backend
 from wxpath.http.frontier.scoring import FrontierScorer, get_frontier_scorer
+from wxpath.http.frontier.fingerprint import get_content_deduper
 from wxpath.util.logging import get_logger
 
 log = get_logger(__name__)
@@ -204,6 +205,10 @@ class WXPathEngine(HookedEngineBase):
 
         frontier = self._injected_frontier or get_frontier_backend()
         scorer = get_frontier_scorer()
+        # M6 layer 2: content near-dup deduper. Default NullDeduper is a no-op, so
+        # the processing path stays byte-identical (I5); SimHashDeduper (opt-in)
+        # skips pages whose main content duplicates an already-recorded page.
+        deduper = get_content_deduper()
         inflight: dict[str, CrawlTask] = {}
         pending_tasks = 0
 
@@ -345,6 +350,18 @@ class WXPathEngine(HookedEngineBase):
 
                     elem = await self.post_parse_hooks(elem, ctx)
                     if elem is None:
+                        if await is_terminal():
+                            break
+                        continue
+
+                    # M6 layer 2: skip a page whose main content near-duplicates one
+                    # already recorded this run. The first occurrence of any content
+                    # is kept (and its links expanded); later near-dups yield nothing
+                    # and are not expanded. NullDeduper (default) never triggers, so
+                    # the path below is unchanged for default crawls (I5).
+                    if deduper.is_duplicate(elem):
+                        log.debug(f"content near-duplicate, skipping {task.url}")
+                        await frontier.mark_done(task.url)
                         if await is_terminal():
                             break
                         continue

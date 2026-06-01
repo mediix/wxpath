@@ -777,6 +777,17 @@ I11 (canonical dedup, M6): URL canonicalization is a pure function of the URL st
     (extends I5). With it enabled, normalization collapses URL variants of the same
     page to a single fetch — affecting which URLs are fetched, never the data
     extracted from a given page (a realization of I4).
+
+I12 (content dedup, M6 layer 2): content-fingerprint near-duplicate detection is an
+    engine-owned strategy (get_content_deduper()), not a frontier concern — it needs
+    the parsed DOM, not URL scheduling. It uses a stable BLAKE2b SimHash (never
+    Python's salted hash()), so a fingerprinted crawl is bit-reproducible given the
+    deterministic crawl order (extends I6). With http.client.frontier.fingerprint.enabled
+    off (the default) the deduper is a no-op (NullDeduper) and the engine processing
+    path is byte-identical to pre-layer-2 (extends I5). With it on, the first page of
+    any content is kept and its links expanded; later near-duplicates are recorded
+    once — affecting which pages' data is recorded, never the data extracted from the
+    page that is kept (a realization of I4).
 ```
 
 ## What we deliberately will not do
